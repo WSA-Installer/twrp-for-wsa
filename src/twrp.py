@@ -439,6 +439,16 @@ class InitrdManager:
         with open(src_path, "rb") as f:
             data = f.read()
         existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
+        basename = os.path.basename(src_path)
+        if basename == "init" and "init" in existing and "init_orig" not in existing:
+            _log(f"Renaming /init -> /init_orig")
+            for name, ds, sz, hp in CpioUtils.scan_entries(self.path):
+                if name == "/init" or name == "init":
+                    orig_data = CpioUtils.read_file(self.path, name)
+                    if orig_data:
+                        CpioUtils.add_file(self.path, "/init_orig", orig_data)
+                        _log(f"  Saved /init_orig ({len(orig_data):,} bytes)")
+                    break
         if arcname in existing:
             _debug(f"  Replacing existing: {arcname}")
             CpioUtils.delete_file(self.path, arcname)
@@ -458,6 +468,16 @@ class InitrdManager:
                     data = f.read()
                 entries_to_add.append((arcname, data, 0o100644))
         existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
+        has_init = any(a.split("/")[-1] == "init" for a, _, _ in entries_to_add)
+        if has_init and "init" in existing and "init_orig" not in existing:
+            _log(f"Renaming /init -> /init_orig")
+            for name, ds, sz, hp in CpioUtils.scan_entries(self.path):
+                if name == "/init" or name == "init":
+                    orig_data = CpioUtils.read_file(self.path, name)
+                    if orig_data:
+                        CpioUtils.add_file(self.path, "/init_orig", orig_data)
+                        _log(f"  Saved /init_orig ({len(orig_data):,} bytes)")
+                    break
         new_entries = []
         for arcname, data, mode in entries_to_add:
             if arcname in existing:
