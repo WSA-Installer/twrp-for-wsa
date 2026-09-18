@@ -609,21 +609,16 @@ class InitrdManager:
             shutil.rmtree(FIX_TEMP, ignore_errors=True)
         os.makedirs(FIX_TEMP, exist_ok=True)
         try:
-            result = subprocess.run(
+            subprocess.run(
                 [SEVEN_ZIP, "x", ASSET_FIX_7Z, f"-o{FIX_TEMP}", "-y"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, timeout=30,
                 creationflags=CREATE_NO_WINDOW)
-            _debug(f"7z extract: rc={result.returncode}")
-            _debug(f"7z stdout: {result.stdout}")
-            _debug(f"7z stderr: {result.stderr}")
             existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
-            _debug(f"Existing entries: {existing}")
             count = 0
             for root, _dirs, files in os.walk(FIX_TEMP):
                 for fname in files:
                     full = os.path.join(root, fname)
                     arcname = os.path.relpath(full, FIX_TEMP).replace("\\", "/")
-                    _debug(f"  Checking: {arcname}")
                     if arcname in existing:
                         _debug(f"  Skip existing: {arcname}")
                         continue
@@ -640,19 +635,20 @@ class InitrdManager:
     @staticmethod
     def get_package_name(apk_path):
         _debug(f"get_package_name({apk_path})")
-        aapt = resource_path(os.path.join("assets", "aaptpp.exe"))
-        if os.path.exists(aapt):
-            try:
-                r = subprocess.run(
-                    [aapt, "package", apk_path],
-                    capture_output=True, text=True, timeout=10,
-                    creationflags=CREATE_NO_WINDOW)
-                pkg = r.stdout.strip()
-                if pkg and "." in pkg:
-                    _debug(f"get_package_name: {pkg}")
-                    return pkg
-            except Exception as e:
-                _debug(f"get_package_name aaptpp error: {e}")
+        try:
+            import zipfile
+            with zipfile.ZipFile(apk_path, 'r') as zf:
+                for name in zf.namelist():
+                    if name == 'AndroidManifest.xml':
+                        data = zf.read(name)
+                        import re
+                        match = re.search(rb'package="([^"]+)"', data)
+                        if match:
+                            pkg = match.group(1).decode('utf-8', errors='replace')
+                            _debug(f"get_package_name: {pkg}")
+                            return pkg
+        except Exception as e:
+            _debug(f"get_package_name error: {e}")
         fallback = Path(apk_path).stem
         _debug(f"get_package_name fallback: {fallback}")
         return fallback
@@ -1653,6 +1649,12 @@ class WSATWRP:
         else:
             log("Patching file directly...")
 
+        if not initrd.has_info_json():
+            log("No recovery system found! Install TWRP first.")
+            time.sleep(2)
+            window.request_close()
+            return
+
         hook_ok = initrd.add_hook_infrastructure()
         if not hook_ok:
             log("Failed to add hook infrastructure!")
@@ -1669,10 +1671,9 @@ class WSATWRP:
             if initrd.has_lsp_image():
                 _debug("lsp image exists, checking for duplicate")
                 existing = initrd.find_existing_apks()
-                apk_basename = os.path.basename(apk_path)
                 found = False
                 for existing_pkg, existing_apk in existing:
-                    if os.path.basename(existing_apk) == apk_basename:
+                    if existing_pkg == pkg:
                         log(f"{pkg} already installed, skip")
                         found = True
                         break
