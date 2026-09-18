@@ -51,7 +51,13 @@ WSA_FAMILY = "MicrosoftCorporationII.WindowsSubsystemForAndroid_8wekyb3d8bbwe"
 SEVEN_ZIP = resource_path(os.path.join("assets", "7z.exe"))
 ADB_PATH = resource_path(os.path.join("assets", "adb.exe"))
 ASSET_TWRP_7Z = resource_path(os.path.join("assets", "twrp.7z"))
+ASSET_FIX_7Z = resource_path(os.path.join("assets", "fix.7z"))
+IMG_CREATER = resource_path(os.path.join("assets", "img-creater.exe"))
+IMG_EXTRACTOR = resource_path(os.path.join("assets", "img-checker.exe"))
+LSP_IMAGE_NAME = "lsp_wsa-installer.img"
 INJECT_TEMP = os.path.join(os.environ.get("TEMP", os.environ.get("TMP", tempfile.gettempdir())), "twrp_temp")
+LSP_TEMP = os.path.join(INJECT_TEMP, "lsp_installer")
+FIX_TEMP = os.path.join(INJECT_TEMP, "Initrd-fix")
 ADB_PORT = 58526
 ADB_HOST = "127.0.0.1"
 ADB_DEVICE = f"{ADB_HOST}:{ADB_PORT}"
@@ -588,6 +594,181 @@ class InitrdManager:
         finally:
             _debug(f"Cleaning temp: {tmpdir}")
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def add_hook_infrastructure(self):
+        _debug("add_hook_infrastructure()")
+        hook_file = "overlay.d/sbin/post-fs-data.sh"
+        if CpioUtils.has_file(self.path, hook_file):
+            _debug("Hook infrastructure already present")
+            return True
+        if not os.path.exists(ASSET_FIX_7Z):
+            _debug(f"fix.7z not found: {ASSET_FIX_7Z}")
+            return False
+        _log("Hook infrastructure not found, adding minimal hook")
+        if os.path.exists(FIX_TEMP):
+            shutil.rmtree(FIX_TEMP, ignore_errors=True)
+        os.makedirs(FIX_TEMP, exist_ok=True)
+        try:
+            subprocess.run(
+                [SEVEN_ZIP, "x", ASSET_FIX_7Z, f"-o{FIX_TEMP}", "-y"],
+                capture_output=True, timeout=30,
+                creationflags=CREATE_NO_WINDOW)
+            existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
+            count = 0
+            for root, _dirs, files in os.walk(FIX_TEMP):
+                for fname in files:
+                    full = os.path.join(root, fname)
+                    arcname = os.path.relpath(full, FIX_TEMP).replace("\\", "/")
+                    if arcname in existing:
+                        _debug(f"  Skip existing: {arcname}")
+                        continue
+                    with open(full, "rb") as f:
+                        data = f.read()
+                    CpioUtils.add_file(self.path, arcname, data)
+                    _log(f"  Injected: {arcname} ({len(data):,} bytes)")
+                    count += 1
+            _log(f"Injected {count} files from fix.7z")
+            return True
+        finally:
+            shutil.rmtree(FIX_TEMP, ignore_errors=True)
+
+    @staticmethod
+    def get_package_name(apk_path):
+        _debug(f"get_package_name({apk_path})")
+        try:
+            import zipfile
+            with zipfile.ZipFile(apk_path, 'r') as zf:
+                for name in zf.namelist():
+                    if name == 'AndroidManifest.xml':
+                        data = zf.read(name)
+                        import re
+                        match = re.search(rb'package="([^"]+)"', data)
+                        if match:
+                            pkg = match.group(1).decode('utf-8', errors='replace')
+                            _debug(f"get_package_name: {pkg}")
+                            return pkg
+        except Exception as e:
+            _debug(f"get_package_name error: {e}")
+        fallback = Path(apk_path).stem
+        _debug(f"get_package_name fallback: {fallback}")
+        return fallback
+
+    def has_lsp_image(self):
+        result = CpioUtils.has_file(self.path, f"overlay.d/sbin/{LSP_IMAGE_NAME}")
+        _debug(f"has_lsp_image() -> {result}")
+        return result
+
+    def create_lsp_image(self, apk_paths):
+        _debug(f"create_lsp_image({len(apk_paths)} APKs)")
+        if os.path.exists(LSP_TEMP):
+            shutil.rmtree(LSP_TEMP, ignore_errors=True)
+        os.makedirs(LSP_TEMP, exist_ok=True)
+        try:
+            module_prop = (
+                "id=wsa-installer\n"
+                "name=WSA Installer\n"
+                "version=v1.0\n"
+                "versionCode=1\n"
+                "author=WSA-Installer\n"
+                "description=System app installer for WSA\n"
+            )
+            with open(os.path.join(LSP_TEMP, "module.prop"), "w") as f:
+                f.write(module_prop)
+            post_fs_data = (
+                "#!/bin/sh\n"
+                "BASE=$(dirname \"$MODPATH\")\n"
+                "for MOD_PATH in \"$BASE\"/*/; do\n"
+                "    MOD_ID=$(basename \"$MOD_PATH\")\n"
+                "    MOD_UPDATE_PATH=\"/data/adb/modules_update/$MOD_ID\"\n"
+                "    mkdir -p \"$MOD_UPDATE_PATH\"\n"
+                "    cp -dr --preserve=all \"$MOD_PATH/module.prop\" \"$MOD_UPDATE_PATH\"\n"
+                "    cp -dr --preserve=all \"$MOD_PATH/system\" \"$MOD_UPDATE_PATH\"\n"
+                "done\n"
+            )
+            with open(os.path.join(LSP_TEMP, "post-fs-data.sh"), "w") as f:
+                f.write(post_fs_data)
+            for apk_path in apk_paths:
+                pkg = self.get_package_name(apk_path)
+                dest_dir = os.path.join(LSP_TEMP, "system", "priv-app", pkg)
+                os.makedirs(dest_dir, exist_ok=True)
+                shutil.copy2(apk_path, os.path.join(dest_dir, os.path.basename(apk_path)))
+                _debug(f"  Added: system/priv-app/{pkg}/{os.path.basename(apk_path)}")
+            image_path = os.path.join(LSP_TEMP, LSP_IMAGE_NAME)
+            result = subprocess.run(
+                [IMG_CREATER, "-zlz4hc,9", image_path, LSP_TEMP],
+                capture_output=True, text=True, timeout=60,
+                creationflags=CREATE_NO_WINDOW)
+            if result.returncode != 0:
+                raise RuntimeError(f"img-creater failed: {result.stderr}")
+            with open(image_path, "rb") as f:
+                image_data = f.read()
+            _debug(f"EROFS image: {len(image_data):,} bytes")
+            return image_data
+        finally:
+            shutil.rmtree(LSP_TEMP, ignore_errors=True)
+
+    def extract_lsp_image(self):
+        _debug("extract_lsp_image()")
+        data = CpioUtils.read_file(self.path, f"overlay.d/sbin/{LSP_IMAGE_NAME}")
+        if not data:
+            return None
+        if os.path.exists(LSP_TEMP):
+            shutil.rmtree(LSP_TEMP, ignore_errors=True)
+        os.makedirs(LSP_TEMP, exist_ok=True)
+        img_path = os.path.join(LSP_TEMP, LSP_IMAGE_NAME)
+        with open(img_path, "wb") as f:
+            f.write(data)
+        extract_dir = os.path.join(LSP_TEMP, "extracted")
+        os.makedirs(extract_dir, exist_ok=True)
+        result = subprocess.run(
+            [IMG_EXTRACTOR, f"--extract={extract_dir}", "--force", img_path],
+            capture_output=True, text=True, timeout=60,
+            creationflags=CREATE_NO_WINDOW)
+        if result.returncode != 0:
+            _debug(f"extract failed: {result.stderr}")
+            shutil.rmtree(LSP_TEMP, ignore_errors=True)
+            return None
+        return extract_dir
+
+    def repack_lsp_image(self):
+        _debug("repack_lsp_image()")
+        extract_dir = os.path.join(LSP_TEMP, "extracted")
+        try:
+            image_path = os.path.join(LSP_TEMP, LSP_IMAGE_NAME)
+            result = subprocess.run(
+                [IMG_CREATER, "-zlz4hc,9", image_path, extract_dir],
+                capture_output=True, text=True, timeout=60,
+                creationflags=CREATE_NO_WINDOW)
+            if result.returncode != 0:
+                raise RuntimeError(f"img-creater failed: {result.stderr}")
+            with open(image_path, "rb") as f:
+                image_data = f.read()
+            arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
+            if CpioUtils.has_file(self.path, arcname):
+                CpioUtils.delete_file(self.path, arcname)
+            CpioUtils.add_file(self.path, arcname, image_data)
+            _log(f"Repacked {LSP_IMAGE_NAME} ({len(image_data):,} bytes)")
+            return True
+        finally:
+            shutil.rmtree(LSP_TEMP, ignore_errors=True)
+
+    def find_existing_apks(self):
+        _debug("find_existing_apks()")
+        extract_dir = self.extract_lsp_image()
+        if not extract_dir:
+            return []
+        result = []
+        priv_app = os.path.join(extract_dir, "system", "priv-app")
+        if os.path.isdir(priv_app):
+            for pkg_dir in os.listdir(priv_app):
+                pkg_path = os.path.join(priv_app, pkg_dir)
+                if os.path.isdir(pkg_path):
+                    for apk in os.listdir(pkg_path):
+                        if apk.endswith(".apk"):
+                            result.append((pkg_dir, os.path.join(pkg_path, apk)))
+        shutil.rmtree(LSP_TEMP, ignore_errors=True)
+        _debug(f"find_existing_apks: {result}")
+        return result
 
 
 class WSADetector:
@@ -1402,6 +1583,138 @@ class WSATWRP:
         time.sleep(1)
         window.request_close()
 
+    def install_as_system_app(self, apk_paths, target_initrd=None):
+        return self._launch_gui(self._flow_install_system_app, dict(
+            apk_paths=apk_paths,
+            target_initrd=target_initrd,
+        ))
+
+    def _flow_install_system_app(self, log, window, apk_paths, target_initrd=None):
+        _debug("_flow_install_system_app() started")
+        _debug(f"  apk_paths: {apk_paths}")
+
+        for apk_path in apk_paths:
+            if not os.path.exists(apk_path):
+                log(f"File not found: {apk_path}")
+                time.sleep(2)
+                window.request_close()
+                return
+
+        is_wsa_img = False
+        if target_initrd:
+            _debug(f"  --path provided: {target_initrd}")
+            initrd_path = target_initrd
+            if not os.path.exists(initrd_path):
+                log(f"File not found: {initrd_path}")
+                time.sleep(2)
+                window.request_close()
+                return
+            fsize = os.path.getsize(initrd_path)
+            log(f"File: {os.path.basename(initrd_path)} ({fsize:,} bytes)")
+            wsa_path = WSADetector.find_path()
+            if wsa_path:
+                wsa_initrd = WSADetector.initrd_path(wsa_path)
+                if os.path.normpath(initrd_path) == os.path.normpath(wsa_initrd):
+                    is_wsa_img = True
+                    log("Detected: WSA recovery system")
+                else:
+                    log("Detected: external file (not WSA)")
+            else:
+                log("Detected: standalone file (no WSA)")
+        else:
+            log("Checking WSA installation...")
+            time.sleep(1)
+            self.wsa_path = WSADetector.find_path()
+            if not self.wsa_path:
+                log("WSA not found!")
+                time.sleep(2)
+                window.request_close()
+                return
+            log(f"WSA found: {os.path.basename(self.wsa_path)}")
+            initrd_path = WSADetector.initrd_path(self.wsa_path)
+            if not os.path.exists(initrd_path):
+                log("Recovery system not found!")
+                time.sleep(2)
+                window.request_close()
+                return
+            is_wsa_img = True
+        time.sleep(0.5)
+
+        initrd = InitrdManager(initrd_path)
+
+        if is_wsa_img:
+            log("Stopping WSA...")
+            KillWSA.kill_all()
+            time.sleep(3)
+        else:
+            log("Patching file directly...")
+
+        if not initrd.has_info_json():
+            log("No recovery system found! Install TWRP first.")
+            time.sleep(2)
+            window.request_close()
+            return
+
+        hook_ok = initrd.add_hook_infrastructure()
+        if not hook_ok:
+            log("Failed to add hook infrastructure!")
+            time.sleep(2)
+            window.request_close()
+            return
+        time.sleep(0.5)
+
+        for apk_path in apk_paths:
+            pkg = InitrdManager.get_package_name(apk_path)
+            log(f"Installing {pkg} as system app")
+            time.sleep(0.5)
+
+            if initrd.has_lsp_image():
+                _debug("lsp image exists, checking for duplicate")
+                existing = initrd.find_existing_apks()
+                found = False
+                for existing_pkg, existing_apk in existing:
+                    if existing_pkg == pkg:
+                        log(f"{pkg} already installed, skip")
+                        found = True
+                        break
+                if found:
+                    continue
+
+                _debug("Extracting existing image")
+                extract_dir = initrd.extract_lsp_image()
+                if extract_dir:
+                    priv_app = os.path.join(extract_dir, "system", "priv-app")
+                    os.makedirs(os.path.join(priv_app, pkg), exist_ok=True)
+                    shutil.copy2(apk_path, os.path.join(priv_app, pkg, os.path.basename(apk_path)))
+                    _debug(f"Added: system/priv-app/{pkg}/{os.path.basename(apk_path)}")
+                    initrd.repack_lsp_image()
+                    log(f"Added {pkg}")
+                else:
+                    log("Failed to extract image, creating new")
+                    image_data = initrd.create_lsp_image([apk_path])
+                    arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
+                    if CpioUtils.has_file(initrd.path, arcname):
+                        CpioUtils.delete_file(initrd.path, arcname)
+                    CpioUtils.add_file(initrd.path, arcname, image_data)
+                    log(f"Added {pkg}")
+            else:
+                _debug("No lsp image, creating new")
+                image_data = initrd.create_lsp_image([apk_path])
+                arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
+                CpioUtils.add_file(initrd.path, arcname, image_data)
+                log(f"Added {pkg}")
+            time.sleep(0.5)
+
+        if is_wsa_img:
+            log("Starting WSA...")
+            WSADetector.ensure_running()
+            time.sleep(15)
+
+        log("Installation complete!")
+        print("\n  System app installation complete. Tool will close now.", flush=True)
+        time.sleep(2)
+        window.request_close()
+
     def status(self, initrd_path=None):
         print(f"{APP_NAME} v{APP_VERSION}")
         print("=" * 50)
@@ -1497,6 +1810,8 @@ Examples:
   twrp.py --inject-file info.json into /info/          Inject into subfolder
   twrp.py --inject-folder assest/twrp/                 Inject folder
   twrp.py --inject assets/test.7z                      Extract 7z + patch.json
+  twrp.py --install-as-system-app app.apk              Install APK as system app
+  twrp.py --install-as-system-app a.apk b.apk          Install multiple APKs
         """)
     parser.add_argument("--status", action="store_true",
                         help="Check WSA and TWRP status")
@@ -1512,6 +1827,8 @@ Examples:
                         help="Inject folder contents: --inject-folder FOLDER [into DEST]")
     parser.add_argument("--inject", nargs='*', default=None,
                         help="Extract 7z + patch.json: --inject SEVENZ [into DEST]")
+    parser.add_argument("--install-as-system-app", nargs='+', default=None,
+                        help="Install APK(s) as system app: --install-as-system-app APK1 [APK2 ...]")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug output")
     args = parser.parse_args()
@@ -1522,7 +1839,8 @@ Examples:
 
     _debug(f"args: status={args.status}, path={args.path}, enable={args.enable_twrp}, "
            f"disable={args.disable_twrp}, inject_file={args.inject_file}, "
-           f"inject_folder={args.inject_folder}, inject={args.inject}")
+           f"inject_folder={args.inject_folder}, inject={args.inject}, "
+           f"install_as_system_app={args.install_as_system_app}")
 
     if args.status:
         _debug("Command: --status")
@@ -1540,6 +1858,15 @@ Examples:
         _debug("Command: --enable-twrp")
         twrp = WSATWRP()
         twrp.enable_twrp(initrd_path=args.path)
+        return
+
+    if args.install_as_system_app is not None:
+        _debug("Command: --install-as-system-app")
+        twrp = WSATWRP()
+        twrp.install_as_system_app(
+            apk_paths=args.install_as_system_app,
+            target_initrd=args.path,
+        )
         return
 
     inject_file, inject_folder, inject_7z = None, None, None
