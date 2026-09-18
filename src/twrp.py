@@ -584,8 +584,7 @@ class InitrdManager:
                     CpioUtils.add_files(self.path, new_entries)
                 _log(f"Injection complete")
             else:
-                _debug(f"No patch.json found, injecting all files")
-                self.inject_folder(tmpdir, dest)
+                raise RuntimeError("TWRP archive has no patch.json — rejected")
         finally:
             _debug(f"Cleaning temp: {tmpdir}")
             shutil.rmtree(tmpdir, ignore_errors=True)
