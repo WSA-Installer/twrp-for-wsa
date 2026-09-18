@@ -281,21 +281,6 @@ class CpioUtils:
             f.write(trailer)
 
     @staticmethod
-    def add_symlink(archive_path, link_name, target):
-        _debug(f"add_symlink({link_name} -> {target})")
-        if isinstance(target, str):
-            target = target.encode("utf-8")
-        trailer_offset = CpioUtils._find_trailer_offset(archive_path)
-        with open(archive_path, "rb") as f:
-            before_trailer = f.read(trailer_offset)
-        new_entry = CpioUtils._build_entry(link_name, target, mode=0o120777, nlink=1)
-        trailer = CpioUtils._trailer_entry()
-        with open(archive_path, "wb") as f:
-            f.write(before_trailer)
-            f.write(new_entry)
-            f.write(trailer)
-
-    @staticmethod
     def add_files(archive_path, entries):
         _debug(f"add_files: {len(entries)} entries")
         for arcname, data, mode in entries:
@@ -612,9 +597,14 @@ class InitrdManager:
 
     def add_hook_infrastructure(self):
         _debug("add_hook_infrastructure()")
+        hook_file = "overlay.d/sbin/post-fs-data.sh"
+        if CpioUtils.has_file(self.path, hook_file):
+            _debug("Hook infrastructure already present")
+            return True
         if not os.path.exists(ASSET_FIX_7Z):
             _debug(f"fix.7z not found: {ASSET_FIX_7Z}")
             return False
+        _log("Hook infrastructure not found, adding minimal hook")
         if os.path.exists(FIX_TEMP):
             shutil.rmtree(FIX_TEMP, ignore_errors=True)
         os.makedirs(FIX_TEMP, exist_ok=True)
@@ -623,13 +613,6 @@ class InitrdManager:
                 [SEVEN_ZIP, "x", ASSET_FIX_7Z, f"-o{FIX_TEMP}", "-y"],
                 capture_output=True, timeout=30,
                 creationflags=CREATE_NO_WINDOW)
-
-            _log("Adding hook infrastructure")
-
-            if CpioUtils.has_file(self.path, "init"):
-                CpioUtils.delete_file(self.path, "init")
-                _log("  deleted original /init")
-
             existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
             count = 0
             for root, _dirs, files in os.walk(FIX_TEMP):
@@ -637,11 +620,12 @@ class InitrdManager:
                     full = os.path.join(root, fname)
                     arcname = os.path.relpath(full, FIX_TEMP).replace("\\", "/")
                     if arcname in existing:
-                        CpioUtils.delete_file(self.path, arcname)
+                        _debug(f"  Skip existing: {arcname}")
+                        continue
                     with open(full, "rb") as f:
                         data = f.read()
                     CpioUtils.add_file(self.path, arcname, data)
-                    _log(f"  {arcname} ({len(data):,} bytes)")
+                    _log(f"  Injected: {arcname} ({len(data):,} bytes)")
                     count += 1
             _log(f"Injected {count} files from fix.7z")
             return True
@@ -651,19 +635,20 @@ class InitrdManager:
     @staticmethod
     def get_package_name(apk_path):
         _debug(f"get_package_name({apk_path})")
-        aapt = resource_path(os.path.join("assets", "aaptpp.exe"))
-        if os.path.exists(aapt):
-            try:
-                r = subprocess.run(
-                    [aapt, "package", apk_path],
-                    capture_output=True, text=True, timeout=10,
-                    creationflags=CREATE_NO_WINDOW)
-                pkg = r.stdout.strip()
-                if pkg and "." in pkg:
-                    _debug(f"get_package_name: {pkg}")
-                    return pkg
-            except Exception as e:
-                _debug(f"get_package_name aaptpp error: {e}")
+        try:
+            import zipfile
+            with zipfile.ZipFile(apk_path, 'r') as zf:
+                for name in zf.namelist():
+                    if name == 'AndroidManifest.xml':
+                        data = zf.read(name)
+                        import re
+                        match = re.search(rb'package="([^"]+)"', data)
+                        if match:
+                            pkg = match.group(1).decode('utf-8', errors='replace')
+                            _debug(f"get_package_name: {pkg}")
+                            return pkg
+        except Exception as e:
+            _debug(f"get_package_name error: {e}")
         fallback = Path(apk_path).stem
         _debug(f"get_package_name fallback: {fallback}")
         return fallback
@@ -691,11 +676,14 @@ class InitrdManager:
                 f.write(module_prop)
             post_fs_data = (
                 "#!/bin/sh\n"
-                "SCRIPT_DIR=$(dirname \"$0\")\n"
-                "MOD_UPDATE_PATH=\"/data/adb/modules_update/wsa-installer\"\n"
-                "mkdir -p \"$MOD_UPDATE_PATH\"\n"
-                "cp -dr --preserve=all \"$SCRIPT_DIR/module.prop\" \"$MOD_UPDATE_PATH\"\n"
-                "cp -dr --preserve=all \"$SCRIPT_DIR/system\" \"$MOD_UPDATE_PATH\"\n"
+                "BASE=$(dirname \"$MODPATH\")\n"
+                "for MOD_PATH in \"$BASE\"/*/; do\n"
+                "    MOD_ID=$(basename \"$MOD_PATH\")\n"
+                "    MOD_UPDATE_PATH=\"/data/adb/modules_update/$MOD_ID\"\n"
+                "    mkdir -p \"$MOD_UPDATE_PATH\"\n"
+                "    cp -dr --preserve=all \"$MOD_PATH/module.prop\" \"$MOD_UPDATE_PATH\"\n"
+                "    cp -dr --preserve=all \"$MOD_PATH/system\" \"$MOD_UPDATE_PATH\"\n"
+                "done\n"
             )
             with open(os.path.join(LSP_TEMP, "post-fs-data.sh"), "w") as f:
                 f.write(post_fs_data)
@@ -1661,6 +1649,12 @@ class WSATWRP:
         else:
             log("Patching file directly...")
 
+        if not initrd.has_info_json():
+            log("No recovery system found! Install TWRP first.")
+            time.sleep(2)
+            window.request_close()
+            return
+
         hook_ok = initrd.add_hook_infrastructure()
         if not hook_ok:
             log("Failed to add hook infrastructure!")
@@ -1677,10 +1671,9 @@ class WSATWRP:
             if initrd.has_lsp_image():
                 _debug("lsp image exists, checking for duplicate")
                 existing = initrd.find_existing_apks()
-                apk_basename = os.path.basename(apk_path)
                 found = False
                 for existing_pkg, existing_apk in existing:
-                    if os.path.basename(existing_apk) == apk_basename:
+                    if existing_pkg == pkg:
                         log(f"{pkg} already installed, skip")
                         found = True
                         break
