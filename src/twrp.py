@@ -388,6 +388,7 @@ class InitrdManager:
         return result
 
     def inject_from_7z(self, seven_zip_path):
+        _debug(f"inject_from_7z({seven_zip_path})")
         tmpdir = INJECT_TEMP
         if os.path.exists(tmpdir):
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -421,6 +422,7 @@ class InitrdManager:
                 CpioUtils.delete_file(self.path, arcname)
             if new_entries:
                 CpioUtils.add_files(self.path, new_entries)
+            _log(f"Injected {len(entries_to_add)} files from 7z")
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -438,8 +440,10 @@ class InitrdManager:
             data = f.read()
         existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
         if arcname in existing:
+            _debug(f"  Replacing existing: {arcname}")
             CpioUtils.delete_file(self.path, arcname)
         CpioUtils.add_file(self.path, arcname, data)
+        _log(f"Injected {arcname} ({len(data):,} bytes)")
 
     def inject_folder(self, src_folder, dest="/"):
         _debug(f"inject_folder({src_folder}, dest={dest})")
@@ -457,10 +461,12 @@ class InitrdManager:
         new_entries = []
         for arcname, data, mode in entries_to_add:
             if arcname in existing:
+                _debug(f"  Replacing existing: {arcname}")
                 CpioUtils.delete_file(self.path, arcname)
             new_entries.append((arcname, data, mode))
         if new_entries:
             CpioUtils.add_files(self.path, new_entries)
+        _log(f"Injected {len(entries_to_add)} files from folder")
 
     def inject_7z_with_patch(self, seven_zip_path, dest="/"):
         _debug(f"inject_7z_with_patch({seven_zip_path}, dest={dest})")
@@ -469,23 +475,23 @@ class InitrdManager:
             shutil.rmtree(tmpdir, ignore_errors=True)
         os.makedirs(tmpdir, exist_ok=True)
         try:
-            _debug(f"  Extracting: {seven_zip_path} -> {tmpdir}")
+            _debug(f"Extracting: {seven_zip_path} -> {tmpdir}")
             result = subprocess.run(
                 [SEVEN_ZIP, "x", seven_zip_path, f"-o{tmpdir}", "-y"],
                 capture_output=True, text=True, timeout=30,
                 creationflags=CREATE_NO_WINDOW)
             if result.returncode != 0:
-                _debug(f"  7z extract FAILED: {result.stderr}")
+                _debug(f"7z extract FAILED: {result.stderr}")
             else:
-                _debug(f"  7z extract OK")
+                _debug(f"7z extract OK")
 
-            _debug("  Temp folder contents:")
+            _debug("Temp folder contents:")
             for root, dirs, files in os.walk(tmpdir):
                 for fname in files:
                     full = os.path.join(root, fname)
                     rel = os.path.relpath(full, tmpdir)
                     fsize = os.path.getsize(full)
-                    _debug(f"    {rel} ({fsize:,} bytes)")
+                    _debug(f"  {rel} ({fsize:,} bytes)")
 
             patch_path = os.path.join(tmpdir, "patch.json")
             if os.path.exists(patch_path):
@@ -493,38 +499,35 @@ class InitrdManager:
                 _debug(f"Path: {patch_path}")
                 with open(patch_path, "r") as f:
                     patch = json.load(f)
-                _log(f"patch.json has {len(patch)} entries")
-                for item in patch:
-                    _debug(f"  pick={item['pick']} -> drop={item['drop']}")
 
                 existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
 
-                rename_items = [item for item in patch if "rename" in item]
-                for item in rename_items:
-                    orig_name = item.get("original-name", "").strip("/")
-                    rename_to = item["rename"].strip("/")
-                    _debug(f"  Rename rule: {orig_name} -> {rename_to}")
-                    if not orig_name:
-                        _debug(f"    SKIP: missing original-name")
-                        continue
-                    already_renamed = rename_to in existing
-                    orig_exists = orig_name in existing
-                    if already_renamed:
-                        _log(f"/{rename_to} already exists, skip rename")
-                    elif not orig_exists:
-                        _debug(f"    SKIP: /{orig_name} not found in cpio")
-                    else:
-                        _log(f"Renaming /{orig_name} -> /{rename_to}")
-                        for name, ds, sz, hp in CpioUtils.scan_entries(self.path):
-                            if name == f"/{orig_name}" or name == orig_name:
-                                orig_data = CpioUtils.read_file(self.path, name)
-                                if orig_data:
-                                    CpioUtils.add_file(self.path, f"/{rename_to}", orig_data)
-                                    _log(f"  Saved /{rename_to} ({len(orig_data):,} bytes)")
-                                break
+                for item in patch:
+                    if "rename" in item:
+                        orig_name = item.get("original-name", "").strip("/")
+                        rename_to = item["rename"].strip("/")
+                        if not orig_name:
+                            _debug(f"  SKIP rename: missing original-name")
+                            continue
+                        if rename_to in existing:
+                            _log(f"/{rename_to} already exists, skip rename")
+                        elif orig_name not in existing:
+                            _debug(f"  SKIP rename: /{orig_name} not found in cpio")
+                        else:
+                            _log(f"Renaming /{orig_name} -> /{rename_to}")
+                            for name, ds, sz, hp in CpioUtils.scan_entries(self.path):
+                                if name == f"/{orig_name}" or name == orig_name:
+                                    orig_data = CpioUtils.read_file(self.path, name)
+                                    if orig_data:
+                                        CpioUtils.add_file(self.path, f"/{rename_to}", orig_data)
+                                        _log(f"  Saved /{rename_to} ({len(orig_data):,} bytes)")
+                                    break
+
+                pick_items = [item for item in patch if "pick" in item]
+                _log(f"Injecting {len(pick_items)} entries")
 
                 entries_to_add = []
-                for item in patch:
+                for item in pick_items:
                     pick = item["pick"].strip("/")
                     drop = item["drop"].strip("/")
                     pick_full = os.path.join(tmpdir, pick.replace("/", os.sep))
@@ -550,7 +553,7 @@ class InitrdManager:
                     else:
                         _debug(f"    WARNING: source not found!")
 
-                _debug(f"  Total entries to inject: {len(entries_to_add)}")
+                _debug(f"Total entries to inject: {len(entries_to_add)}")
                 new_entries = []
                 for arcname, data, mode in entries_to_add:
                     if arcname in existing:
@@ -559,12 +562,12 @@ class InitrdManager:
                     new_entries.append((arcname, data, mode))
                 if new_entries:
                     CpioUtils.add_files(self.path, new_entries)
-                _debug("  Injection complete")
+                _log(f"Injection complete")
             else:
-                _debug(f"  No patch.json found, injecting all files")
+                _debug(f"No patch.json found, injecting all files")
                 self.inject_folder(tmpdir, dest)
         finally:
-            _debug(f"  Cleaning temp: {tmpdir}")
+            _debug(f"Cleaning temp: {tmpdir}")
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 

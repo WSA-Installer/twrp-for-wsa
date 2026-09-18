@@ -1,5 +1,6 @@
 [
-  {"pick": "/init", "drop": "/", "original-name": "init", "rename": "init_orig"},
+  {"original-name": "init", "rename": "init_orig"},
+  {"pick": "/init", "drop": "/"},
   {"pick": "/info.json", "drop": "/"},
   {"pick": "/sbin/", "drop": "/sbin/"},
   {"pick": "/twres/", "drop": "/twres/"},
