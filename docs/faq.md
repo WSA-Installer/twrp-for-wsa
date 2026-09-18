@@ -22,7 +22,7 @@ TWRP for WSA brings full Team Win Recovery Project functionality to Windows Subs
 
 ### Is TWRP for WSA free?
 
-Yes. TWRP for WSA is open-source under the MIT License.
+Yes. TWRP for WSA is open-source under the Source-Available / Community-Extension License.
 
 ### Do I need root?
 

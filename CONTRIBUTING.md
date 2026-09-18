@@ -89,7 +89,7 @@ twrp-for-wsa/
 ├── info.json                # TWRP metadata template
 ├── patch.json               # Cpio injection map
 ├── requirements.txt         # Python dependencies
-├── LICENSE                  # MIT License
+├── LICENSE.md              # Source-Available / Community-Extension License
 ├── CONTRIBUTING.md          # This file
 ├── README.md                # Project documentation
 └── .github/
@@ -205,7 +205,7 @@ The TWRP recovery image is built automatically via GitHub Actions:
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE).
+By contributing, you agree that your contributions will be licensed under the [Source-Available / Community-Extension License](LICENSE.md).
 
 ---
 

@@ -93,7 +93,7 @@ twrp-for-wsa/
 ├── info.json                # TWRP metadata template
 ├── patch.json               # Cpio injection map
 ├── requirements.txt         # Python dependencies
-├── LICENSE                  # MIT License
+├── LICENSE.md              # Source-Available / Community-Extension License
 ├── CONTRIBUTING.md          # Contribution guidelines
 ├── CODE_OF_CONDUCT.md       # Code of conduct
 ├── SECURITY.md              # Security policy

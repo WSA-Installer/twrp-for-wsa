@@ -127,7 +127,7 @@ Key properties:
 ```json
 {
     "recovery_flag": "true",
-    "twrp_support": "True",
+    "twrp_support": "true",
     "wsa_version": "2404.40000.2.0",
     "amazon_support": "false",
     "note": "TWRP Recovery enabled"

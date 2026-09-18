@@ -398,7 +398,7 @@ twrp-for-wsa/
 ├── SUPPORT.md               # Support and FAQ
 ├── ROADMAP.md               # Planned features
 ├── CONTRIBUTING.md          # Contribution guidelines
-├── LICENSE                  # MIT License
+├── LICENSE.md              # Source-Available / Community-Extension License
 ├── CHANGELOG.md             # Version history
 └── README.md                # This file
 ```
@@ -531,7 +531,7 @@ The TWRP recovery image is built automatically from source:
 
 ## License
 
-This project is licensed under the **Source-Available / Community-Extension License** — see [LICENSE](LICENSE) for details.
+This project is licensed under the **Source-Available / Community-Extension License** — see [LICENSE.md](LICENSE.md) for details.
 
 <br>
 

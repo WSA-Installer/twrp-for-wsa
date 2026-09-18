@@ -48,14 +48,14 @@ All variants are built from WSA **2407.40000.4.0** x64 Release-Nightly images an
 
 ```json
 {
-  "twrp_support": "True",
-  "gapp_support": "True",
-  "root_support": "False",
+  "twrp_support": "true",
+  "gapp_support": "true",
+  "root_support": "false",
   "root_method": "Unknown",
-  "amazon_support": "True",
+  "amazon_support": "true",
   "build_version": "4.1.0",
   "wsa_version": "2407.40000.4.0",
-  "recovery_flag": "False",
+  "recovery_flag": "false",
   "note": "TWRP Recovery enabled for WSA 2407.40000.4.0 x64 GApps Standard variant."
 }
 ```
@@ -88,14 +88,14 @@ twrp.exe --status --path <initrd_path>
 
 ```json
 {
-  "twrp_support": "True",
-  "gapp_support": "True",
-  "root_support": "False",
+  "twrp_support": "true",
+  "gapp_support": "true",
+  "root_support": "false",
   "root_method": "Unknown",
-  "amazon_support": "False",
+  "amazon_support": "false",
   "build_version": "4.1.0",
   "wsa_version": "2407.40000.4.0",
-  "recovery_flag": "False",
+  "recovery_flag": "false",
   "note": "TWRP Recovery enabled for WSA 2407.40000.4.0 x64 GApps + NoAmazon variant."
 }
 ```
@@ -125,14 +125,14 @@ twrp.exe --status --path <initrd_path>
 
 ```json
 {
-  "twrp_support": "True",
-  "gapp_support": "True",
-  "root_support": "True",
+  "twrp_support": "true",
+  "gapp_support": "true",
+  "root_support": "true",
   "root_method": "Magisk",
-  "amazon_support": "True",
+  "amazon_support": "true",
   "build_version": "4.1.0",
   "wsa_version": "2407.40000.4.0",
-  "recovery_flag": "False",
+  "recovery_flag": "false",
   "note": "TWRP Recovery enabled for WSA 2407.40000.4.0 x64 Magisk Stable + GApps variant."
 }
 ```
@@ -162,14 +162,14 @@ twrp.exe --status --path <initrd_path>
 
 ```json
 {
-  "twrp_support": "True",
-  "gapp_support": "False",
-  "root_support": "False",
+  "twrp_support": "true",
+  "gapp_support": "false",
+  "root_support": "false",
   "root_method": "Unknown",
-  "amazon_support": "True",
+  "amazon_support": "true",
   "build_version": "4.1.0",
   "wsa_version": "2407.40000.4.0",
-  "recovery_flag": "False",
+  "recovery_flag": "false",
   "note": "TWRP Recovery enabled for WSA 2407.40000.4.0 x64 NoGApps variant."
 }
 ```
@@ -199,14 +199,14 @@ twrp.exe --status --path <initrd_path>
 
 ```json
 {
-  "twrp_support": "True",
-  "gapp_support": "True",
-  "root_support": "True",
+  "twrp_support": "true",
+  "gapp_support": "true",
+  "root_support": "true",
   "root_method": "Magisk Canary",
-  "amazon_support": "False",
+  "amazon_support": "false",
   "build_version": "4.1.0",
   "wsa_version": "2407.40000.4.0",
-  "recovery_flag": "False",
+  "recovery_flag": "false",
   "note": "TWRP Recovery enabled for WSA 2407.40000.4.0 x64 Magisk Canary + GApps + NoAmazon variant."
 }
 ```
@@ -236,14 +236,14 @@ twrp.exe --status --path <initrd_path>
 
 ```json
 {
-  "twrp_support": "True",
-  "gapp_support": "False",
-  "root_support": "True",
+  "twrp_support": "true",
+  "gapp_support": "false",
+  "root_support": "true",
   "root_method": "Magisk",
-  "amazon_support": "False",
+  "amazon_support": "false",
   "build_version": "4.1.0",
   "wsa_version": "2407.40000.4.0",
-  "recovery_flag": "False",
+  "recovery_flag": "false",
   "note": "TWRP Recovery enabled for WSA 2407.40000.4.0 x64 Magisk Stable + NoGApps + NoAmazon variant."
 }
 ```
@@ -273,14 +273,14 @@ twrp.exe --status --path <initrd_path>
 
 ```json
 {
-  "twrp_support": "True",
-  "gapp_support": "False",
-  "root_support": "False",
+  "twrp_support": "true",
+  "gapp_support": "false",
+  "root_support": "false",
   "root_method": "Unknown",
-  "amazon_support": "False",
+  "amazon_support": "false",
   "build_version": "4.1.0",
   "wsa_version": "2407.40000.4.0",
-  "recovery_flag": "False",
+  "recovery_flag": "false",
   "note": "TWRP Recovery enabled for WSA 2407.40000.4.0 x64 NoGApps + NoAmazon variant."
 }
 ```

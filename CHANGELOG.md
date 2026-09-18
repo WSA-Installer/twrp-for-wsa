@@ -22,7 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `patch.json` cpio injection map
 - GitHub Actions automated TWRP build
 - Complete documentation (installation, commands, architecture, supported images, troubleshooting)
-- MIT License
+- Source-Available / Community-Extension License
 - Contributing guide
 
 ### Changed
