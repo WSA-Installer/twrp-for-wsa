@@ -236,25 +236,17 @@ flowchart TD
     A[WSA Kernel] --> B["/init (Dispatcher ELF)"]
     B --> C{Reads /info.json}
     C -->|"recovery_flag: true"| D["exec /sbin/twrp"]
-    C -->|"recovery_flag: false"| F{Boot chain}
-    F -->|GApps/Magisk| G["exec /lspinit"]
-    F -->|Magisk fallback| H["exec /wsainit"]
-    F -->|NoGApps fallback| I["exec /init.orig"]
-    D --> E[TWRP Recovery Boots]
-    G --> J[Android Boots Normally]
-    H --> J
-    I --> J
+    C -->|"recovery_flag: false"| E["exec /init_orig"]
+    D --> F[TWRP Recovery Boots]
+    E --> G[Android Boots Normally]
 
     style A fill:#2d2d2d,stroke:#808080,color:#fff
     style B fill:#4a2d8c,stroke:#808080,color:#fff
     style C fill:#1a5276,stroke:#808080,color:#fff
     style D fill:#27ae60,stroke:#808080,color:#fff
-    style E fill:#27ae60,stroke:#808080,color:#fff
-    style F fill:#1a5276,stroke:#808080,color:#fff
+    style E fill:#2980b9,stroke:#808080,color:#fff
+    style F fill:#27ae60,stroke:#808080,color:#fff
     style G fill:#2980b9,stroke:#808080,color:#fff
-    style H fill:#2980b9,stroke:#808080,color:#fff
-    style I fill:#2980b9,stroke:#808080,color:#fff
-    style J fill:#2980b9,stroke:#808080,color:#fff
 ```
 
 ### Components
@@ -272,15 +264,13 @@ flowchart TD
 ### Boot Flow
 
 1. **WSA kernel loads `initrd.img`** from the WSA installation directory
-2. **Dispatcher (`/init`) executes** — a small ELF binary compiled from `init.c`
+2. **Kernel starts `/init`** — the first userspace process (PID 1)
 3. **Dispatcher reads `/info.json`** from the ramdisk
 4. **If `recovery_flag` is `"true"` (case-insensitive):**
    - Dispatcher executes `/sbin/twrp`
    - TWRP recovery boots with full touch interface
 5. **If `recovery_flag` is `"false"` (case-insensitive):**
-   - GApps/Magisk: Dispatcher executes `/lspinit` (preserved from original)
-   - Magisk: Falls back to `/wsainit` if `/lspinit` fails
-   - NoGApps: Falls back to `/init.orig` (saved original WSL init)
+   - Dispatcher executes `/init_orig` (saved original init)
    - Android boots normally
 
 ### Inject Flow

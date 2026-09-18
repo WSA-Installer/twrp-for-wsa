@@ -1,33 +1,32 @@
 /*
  * TWRP for WSA — Boot Dispatcher
  *
- * Replaces /init in WSA's initrd.img. Reads /info.json to decide
- * whether to boot TWRP recovery or chain to the original init.
+ * Replaces /init in WSA's initrd.img. Kernel always starts at /init.
+ * This binary IS /init after injection.
  *
- * Real WSA initrd structure (from actual images):
+ * Real WSA initrd structure:
  *
- *   Type A — NoGApps (2MB initrd):
+ *   NoGApps (2 files):
  *     /init       — 2MB ELF (full WSL init binary)
- *     /info.json  — metadata
+ *     /info.json
  *
- *   Type B — GApps/Magisk (288MB initrd):
- *     /init       — SYMLINK -> "lspinit"
+ *   GApps/Magisk (12-16 files):
+ *     /init       — SYMLINK -> lspinit
  *     /lspinit    — 430KB ELF (LSP init)
- *     /magiskinit — 278KB ELF (Magisk, if present)
- *     /wsainit    — 2MB ELF (original WSA init, Magisk only)
- *     /info.json  — metadata
+ *     /wsainit    — 2MB ELF (Magisk only)
+ *     /info.json
  *     /overlay.d/sbin/* — GApps/Magisk images
  *
  * After TWRP injection:
- *   /init       — THIS dispatcher (replaces original symlink or ELF)
- *   /sbin/twrp  — TWRP recovery binary (injected)
- *   /info.json  — metadata with recovery_flag
- *   /lspinit    — preserved (GApps/Magisk only)
- *   /wsainit    — preserved (Magisk only)
+ *     /init       — THIS dispatcher (replaces original)
+ *     /init_orig  — original /init (symlink target or ELF)
+ *     /sbin/twrp  — TWRP recovery binary
+ *     /info.json  — metadata with recovery_flag
  *
  * Boot chain:
- *   Recovery:  /init (this) -> read recovery_flag -> exec /sbin/twrp
- *   Normal:    /init (this) -> read recovery_flag -> exec /lspinit or /wsainit
+ *   Kernel -> /init (this dispatcher)
+ *     -> recovery_flag true  -> exec /sbin/twrp (recovery)
+ *     -> recovery_flag false -> exec /init_orig (normal Android)
  */
 
 #include <unistd.h>
@@ -37,9 +36,7 @@
 
 #define INFO_JSON   "/info.json"
 #define TWRP_BIN    "/sbin/twrp"
-#define LSPINIT     "/lspinit"
-#define WSAINIT     "/wsainit"
-#define INIT_ORIG   "/init.orig"
+#define INIT_ORIG   "/init_orig"
 
 static int read_file(const char *path, char *buf, int bufsize) {
     int fd = open(path, O_RDONLY);
@@ -66,26 +63,12 @@ static int cistrstr(const char *haystack, const char *needle) {
 int main(void) {
     char buf[1024];
 
-    /* Read recovery_flag from /info.json */
     if (read_file(INFO_JSON, buf, sizeof(buf)) > 0) {
         if (cistrstr(buf, "\"recovery_flag\": \"true\""))
             execl(TWRP_BIN, "twrp", NULL);
     }
 
-    /*
-     * Normal boot — chain to original init.
-     *
-     * GApps/Magisk images: /init was a symlink to "lspinit".
-     *   The inject process preserves /lspinit, so exec it.
-     *
-     * Magisk images: also have /wsainit as fallback.
-     *
-     * NoGApps images: /init WAS the 2MB WSL init binary.
-     *   The inject process should save it as /init.orig.
-     */
-    execl(LSPINIT, "lspinit", NULL);
-    execl(WSAINIT, "wsainit", NULL);
-    execl(INIT_ORIG, "init.orig", NULL);
+    execl(INIT_ORIG, "init_orig", NULL);
 
     return 1;
 }

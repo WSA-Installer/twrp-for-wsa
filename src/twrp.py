@@ -406,6 +406,12 @@ class InitrdManager:
             existing = {}
             for name, _ds, _sz, _hp in CpioUtils.scan_entries(self.path):
                 existing[name] = True
+            if "init" in existing and "init" in [a.split("/")[-1] for a, _, _ in entries_to_add]:
+                _debug("  Saving original /init as /init_orig")
+                orig_data = CpioUtils.read_file(self.path, "/init")
+                if orig_data:
+                    CpioUtils.add_file(self.path, "/init_orig", orig_data)
+                    _debug(f"    Saved /init_orig ({len(orig_data):,} bytes)")
             new_entries = []
             replace_entries = []
             for arcname, data, mode in entries_to_add:
@@ -523,13 +529,13 @@ class InitrdManager:
                 _debug(f"  Total entries to inject: {len(entries_to_add)}")
 
                 if "/init" in [a for a, _, _ in entries_to_add]:
-                    _debug("  Saving original /init as /init.orig")
+                    _debug("  Saving original /init as /init_orig")
                     for name, ds, sz, hp in CpioUtils.scan_entries(self.path):
                         if name == "/init" or name == "init":
                             orig_data = CpioUtils.read_file(self.path, name)
                             if orig_data:
-                                CpioUtils.add_file(self.path, "/init.orig", orig_data)
-                                _debug(f"    Saved /init.orig ({len(orig_data):,} bytes)")
+                                CpioUtils.add_file(self.path, "/init_orig", orig_data)
+                                _debug(f"    Saved /init_orig ({len(orig_data):,} bytes)")
                             break
 
                 new_entries = []

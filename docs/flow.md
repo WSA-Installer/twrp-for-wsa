@@ -42,15 +42,13 @@ After injection, `/init` is replaced with our dispatcher ELF:
 
 ```
 WSA Kernel
-  └── /init (custom dispatcher ELF)
+  └── /init (custom dispatcher ELF — replaces original symlink or ELF)
         ├── Reads /info.json
         ├── If recovery_flag == "true" (case-insensitive):
         │     └── exec /sbin/twrp
         │           └── TWRP Recovery boots
         └── If recovery_flag == "false":
-              ├── exec /lspinit (GApps/Magisk)
-              ├── exec /wsainit (Magisk fallback)
-              └── exec /init.orig (NoGApps — saved original)
+              └── exec /init_orig (saved original)
                     └── Android boots
 ```
 
@@ -75,26 +73,18 @@ flowchart TD
     B --> C[Reads /info.json]
     C --> D{recovery_flag?}
     D -->|"true (case-insensitive)"| E["exec /sbin/twrp"]
-    D -->|"false (case-insensitive)"| F{Boot chain}
-    F -->|GApps/Magisk| G["exec /lspinit"]
-    F -->|Magisk fallback| H["exec /wsainit"]
-    F -->|NoGApps fallback| I["exec /init.orig"]
-    E --> J[TWRP Recovery Boots]
-    G --> K[Normal Android]
-    H --> K
-    I --> K
+    D -->|"false (case-insensitive)"| F["exec /init_orig"]
+    E --> G[TWRP Recovery Boots]
+    F --> H[Normal Android Boots]
 
     style A fill:#2d2d2d,stroke:#808080,color:#fff
     style B fill:#4a2d8c,stroke:#808080,color:#fff
     style C fill:#1a5276,stroke:#808080,color:#fff
     style D fill:#1a5276,stroke:#808080,color:#fff
     style E fill:#27ae60,stroke:#808080,color:#fff
-    style F fill:#1a5276,stroke:#808080,color:#fff
-    style G fill:#2980b9,stroke:#808080,color:#fff
+    style F fill:#2980b9,stroke:#808080,color:#fff
+    style G fill:#27ae60,stroke:#808080,color:#fff
     style H fill:#2980b9,stroke:#808080,color:#fff
-    style I fill:#2980b9,stroke:#808080,color:#fff
-    style J fill:#27ae60,stroke:#808080,color:#fff
-    style K fill:#2980b9,stroke:#808080,color:#fff
 ```
 
 ---
