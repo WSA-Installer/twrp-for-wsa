@@ -235,18 +235,26 @@ twrp.exe --enable-twrp --path D:\WSA\initrd.img
 flowchart TD
     A[WSA Kernel] --> B["/init (Dispatcher ELF)"]
     B --> C{Reads /info.json}
-    C -->|"recovery_flag: true (case-insensitive)"| D["/sbin/twrp"]
-    C -->|"recovery_flag: false"| E["/lspinit → /wsainit → Android"]
-    D --> F[TWRP Recovery Boots]
-    E --> G[Android Boots Normally]
+    C -->|"recovery_flag: true"| D["exec /sbin/twrp"]
+    C -->|"recovery_flag: false"| F{Boot chain}
+    F -->|GApps/Magisk| G["exec /lspinit"]
+    F -->|Magisk fallback| H["exec /wsainit"]
+    F -->|NoGApps fallback| I["exec /init.orig"]
+    D --> E[TWRP Recovery Boots]
+    G --> J[Android Boots Normally]
+    H --> J
+    I --> J
 
     style A fill:#2d2d2d,stroke:#808080,color:#fff
     style B fill:#4a2d8c,stroke:#808080,color:#fff
     style C fill:#1a5276,stroke:#808080,color:#fff
     style D fill:#27ae60,stroke:#808080,color:#fff
-    style E fill:#2980b9,stroke:#808080,color:#fff
-    style F fill:#27ae60,stroke:#808080,color:#fff
+    style E fill:#27ae60,stroke:#808080,color:#fff
+    style F fill:#1a5276,stroke:#808080,color:#fff
     style G fill:#2980b9,stroke:#808080,color:#fff
+    style H fill:#2980b9,stroke:#808080,color:#fff
+    style I fill:#2980b9,stroke:#808080,color:#fff
+    style J fill:#2980b9,stroke:#808080,color:#fff
 ```
 
 ### Components
@@ -270,7 +278,9 @@ flowchart TD
    - Dispatcher executes `/sbin/twrp`
    - TWRP recovery boots with full touch interface
 5. **If `recovery_flag` is `"false"` (case-insensitive):**
-   - Dispatcher executes `/lspinit` → `/wsainit`
+   - GApps/Magisk: Dispatcher executes `/lspinit` (preserved from original)
+   - Magisk: Falls back to `/wsainit` if `/lspinit` fails
+   - NoGApps: Falls back to `/init.orig` (saved original WSL init)
    - Android boots normally
 
 ### Inject Flow

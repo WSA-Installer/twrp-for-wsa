@@ -21,15 +21,24 @@ TWRP for WSA works by replacing WSA's original `/init` binary with a custom disp
 
 ### Normal WSA Boot (without TWRP)
 
+**GApps/Magisk images:**
 ```
 WSA Kernel
-  └── /init (original lspinit script)
+  └── /init (symlink -> lspinit)
         └── /lspinit
-              └── /wsainit
-                    └── Android boots
+              └── Android boots
+```
+
+**NoGApps images:**
+```
+WSA Kernel
+  └── /init (2MB WSL init ELF)
+        └── Android boots
 ```
 
 ### TWRP-Injected Boot
+
+After injection, `/init` is replaced with our dispatcher ELF:
 
 ```
 WSA Kernel
@@ -39,9 +48,10 @@ WSA Kernel
         │     └── exec /sbin/twrp
         │           └── TWRP Recovery boots
         └── If recovery_flag == "false":
-              └── exec /lspinit
-                    └── /wsainit
-                          └── Android boots
+              ├── exec /lspinit (GApps/Magisk)
+              ├── exec /wsainit (Magisk fallback)
+              └── exec /init.orig (NoGApps — saved original)
+                    └── Android boots
 ```
 
 ### Boot Sequence
@@ -65,20 +75,26 @@ flowchart TD
     B --> C[Reads /info.json]
     C --> D{recovery_flag?}
     D -->|"true (case-insensitive)"| E["exec /sbin/twrp"]
-    D -->|"false (case-insensitive)"| F["exec /lspinit"]
-    E --> G[TWRP Recovery Boots]
-    F --> H["/wsainit → Android"]
-    G --> I[Full Touch Recovery]
-    H --> J[Normal Android]
+    D -->|"false (case-insensitive)"| F{Boot chain}
+    F -->|GApps/Magisk| G["exec /lspinit"]
+    F -->|Magisk fallback| H["exec /wsainit"]
+    F -->|NoGApps fallback| I["exec /init.orig"]
+    E --> J[TWRP Recovery Boots]
+    G --> K[Normal Android]
+    H --> K
+    I --> K
 
     style A fill:#2d2d2d,stroke:#808080,color:#fff
     style B fill:#4a2d8c,stroke:#808080,color:#fff
     style C fill:#1a5276,stroke:#808080,color:#fff
     style D fill:#1a5276,stroke:#808080,color:#fff
     style E fill:#27ae60,stroke:#808080,color:#fff
-    style F fill:#2980b9,stroke:#808080,color:#fff
-    style G fill:#27ae60,stroke:#808080,color:#fff
-    style J fill:#2980b9,stroke:#808080,color:#fff
+    style F fill:#1a5276,stroke:#808080,color:#fff
+    style G fill:#2980b9,stroke:#808080,color:#fff
+    style H fill:#2980b9,stroke:#808080,color:#fff
+    style I fill:#2980b9,stroke:#808080,color:#fff
+    style J fill:#27ae60,stroke:#808080,color:#fff
+    style K fill:#2980b9,stroke:#808080,color:#fff
 ```
 
 ---

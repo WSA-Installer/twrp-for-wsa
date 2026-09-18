@@ -28,29 +28,59 @@ WSA's original `/init` is a simple script that chains to `/lspinit` → `/wsaini
 
 ## Boot Chain
 
+### Real WSA initrd Structure
+
+WSA images come in two types:
+
+**Type A — NoGApps (2MB initrd):**
+```
+/init       [regular]  2MB ELF — full WSL init binary (Microsoft)
+/info.json  [regular]  metadata
+```
+
+**Type B — GApps/Magisk (288MB initrd):**
+```
+/init              [SYMLINK] -> "lspinit"
+/lspinit           [regular]  430KB ELF — LSP init binary
+/magiskinit        [regular]  278KB ELF — Magisk init (if present)
+/wsainit           [regular]  2MB ELF — original WSA init (Magisk only)
+/overlay.d/sbin/*  [regular]  GApps/Magisk images
+/info.json         [regular]  metadata
+```
+
 ### Normal WSA Boot (without TWRP)
 
+**GApps/Magisk:**
 ```
 WSA Kernel
-  └── /init (original lspinit script)
+  └── /init (symlink -> lspinit)
         └── /lspinit
-              └── /wsainit
-                    └── Android boots
+              └── Android boots
+```
+
+**NoGApps:**
+```
+WSA Kernel
+  └── /init (2MB WSL init ELF)
+        └── Android boots
 ```
 
 ### TWRP-Injected Boot
 
+After injection, `/init` is replaced with our dispatcher ELF:
+
 ```
 WSA Kernel
-  └── /init (custom dispatcher ELF)
+  └── /init (custom dispatcher ELF — replaces original symlink or ELF)
         ├── Reads /info.json
         ├── If recovery_flag == "true" (case-insensitive):
         │     └── exec /sbin/twrp
         │           └── TWRP Recovery boots
         └── If recovery_flag == "false":
-              └── exec /lspinit
-                    └── /wsainit
-                          └── Android boots
+              ├── exec /lspinit (GApps/Magisk)
+              ├── exec /wsainit (Magisk fallback)
+              └── exec /init.orig (NoGApps — saved original)
+                    └── Android boots
 ```
 
 ### Mermaid Diagram
@@ -61,20 +91,26 @@ flowchart TD
     B --> C[Reads /info.json]
     C --> D{recovery_flag?}
     D -->|"true (case-insensitive)"| E["exec /sbin/twrp"]
-    D -->|"false (case-insensitive)"| F["exec /lspinit"]
-    E --> G[TWRP Recovery Boots]
-    F --> H["/wsainit → Android"]
-    G --> I[Full Touch Recovery]
-    H --> J[Normal Android]
+    D -->|"false (case-insensitive)"| F{Boot chain}
+    F -->|GApps/Magisk| G["exec /lspinit"]
+    F -->|Magisk fallback| H["exec /wsainit"]
+    F -->|NoGApps fallback| I["exec /init.orig"]
+    E --> J[TWRP Recovery Boots]
+    G --> K[Normal Android]
+    H --> K
+    I --> K
 
     style A fill:#2d2d2d,stroke:#808080,color:#fff
     style B fill:#4a2d8c,stroke:#808080,color:#fff
     style C fill:#1a5276,stroke:#808080,color:#fff
     style D fill:#1a5276,stroke:#808080,color:#fff
     style E fill:#27ae60,stroke:#808080,color:#fff
-    style F fill:#2980b9,stroke:#808080,color:#fff
-    style G fill:#27ae60,stroke:#808080,color:#fff
-    style J fill:#2980b9,stroke:#808080,color:#fff
+    style F fill:#1a5276,stroke:#808080,color:#fff
+    style G fill:#2980b9,stroke:#808080,color:#fff
+    style H fill:#2980b9,stroke:#808080,color:#fff
+    style I fill:#2980b9,stroke:#808080,color:#fff
+    style J fill:#27ae60,stroke:#808080,color:#fff
+    style K fill:#2980b9,stroke:#808080,color:#fff
 ```
 
 ---

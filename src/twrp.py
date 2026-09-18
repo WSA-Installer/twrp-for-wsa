@@ -521,6 +521,17 @@ class InitrdManager:
                         _debug(f"    WARNING: source not found!")
 
                 _debug(f"  Total entries to inject: {len(entries_to_add)}")
+
+                if "/init" in [a for a, _, _ in entries_to_add]:
+                    _debug("  Saving original /init as /init.orig")
+                    for name, ds, sz, hp in CpioUtils.scan_entries(self.path):
+                        if name == "/init" or name == "init":
+                            orig_data = CpioUtils.read_file(self.path, name)
+                            if orig_data:
+                                CpioUtils.add_file(self.path, "/init.orig", orig_data)
+                                _debug(f"    Saved /init.orig ({len(orig_data):,} bytes)")
+                            break
+
                 new_entries = []
                 for arcname, data, mode in entries_to_add:
                     if arcname in existing:
