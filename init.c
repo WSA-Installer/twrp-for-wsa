@@ -27,20 +27,66 @@
  *   Kernel -> /init (this dispatcher)
  *     -> recovery_flag true  -> exec /sbin/twrp (recovery)
  *     -> recovery_flag false -> exec /init_orig (normal Android)
+ *
+ * Debug log:
+ *   Written to /tmp/twrp_debug.log (ramdisk)
+ *   Also tries Windows temp via /mnt/c if available
  */
 
 #include <unistd.h>
 #include <fcntl.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdio.h>
 
-#define INFO_JSON   "/info.json"
-#define TWRP_BIN    "/sbin/twrp"
-#define INIT_ORIG   "/init_orig"
+#define INFO_JSON       "/info.json"
+#define TWRP_BIN        "/sbin/twrp"
+#define INIT_ORIG       "/init_orig"
+#define LOG_RAMDISK     "/tmp/twrp_debug.log"
+#define LOG_WIN_TEMP    "/mnt/c/Users/CYBERBU~1/AppData/Local/Temp/twrp_debug.log"
+
+static int log_fd = -1;
+
+static void log_open(void) {
+    log_fd = open(LOG_RAMDISK, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (log_fd >= 0) {
+        const char *header = "=== TWRP Dispatcher Debug Log ===\n";
+        write(log_fd, header, strlen(header));
+    }
+    int win_fd = open(LOG_WIN_TEMP, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (win_fd >= 0) {
+        const char *header = "=== TWRP Dispatcher Debug Log ===\n";
+        write(win_fd, header, strlen(header));
+        close(win_fd);
+    }
+}
+
+static void log_msg(const char *msg) {
+    if (log_fd >= 0) {
+        write(log_fd, msg, strlen(msg));
+        write(log_fd, "\n", 1);
+    }
+    int win_fd = open(LOG_WIN_TEMP, O_WRONLY | O_APPEND, 0644);
+    if (win_fd >= 0) {
+        write(win_fd, msg, strlen(msg));
+        write(win_fd, "\n", 1);
+        close(win_fd);
+    }
+}
+
+static void log_close(void) {
+    if (log_fd >= 0) {
+        close(log_fd);
+        log_fd = -1;
+    }
+}
 
 static int read_file(const char *path, char *buf, int bufsize) {
     int fd = open(path, O_RDONLY);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        log_msg("  read_file: FAILED to open");
+        return -1;
+    }
     int n = read(fd, buf, bufsize - 1);
     close(fd);
     if (n <= 0) return -1;
@@ -60,15 +106,51 @@ static int cistrstr(const char *haystack, const char *needle) {
     return 0;
 }
 
-int main(void) {
-    char buf[1024];
+static void log_hex_path(const char *path, char *buf, int len) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "  Path: %s", path);
+    log_msg(tmp);
+    if (len < 0) {
+        log_msg("  Status: NOT FOUND");
+    } else {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "  Status: found (%d bytes)", len);
+        log_msg(msg);
+    }
+}
 
-    if (read_file(INFO_JSON, buf, sizeof(buf)) > 0) {
-        if (cistrstr(buf, "\"recovery_flag\": \"true\""))
-            execl(TWRP_BIN, "twrp", NULL);
+int main(void) {
+    log_open();
+    log_msg("--- Dispatcher started ---");
+
+    char buf[1024];
+    int n = read_file(INFO_JSON, buf, sizeof(buf));
+
+    if (n < 0) {
+        log_msg("ERROR: /info.json not found or empty");
+        log_msg("Falling back to /init_orig");
+        log_close();
+        execl(INIT_ORIG, "init_orig", NULL);
+        return 1;
     }
 
-    execl(INIT_ORIG, "init_orig", NULL);
+    log_hex_path(INFO_JSON, buf, n);
+    log_msg("  Checking recovery_flag...");
 
+    if (cistrstr(buf, "\"recovery_flag\": \"true\"")) {
+        log_msg("  recovery_flag = true");
+        log_msg("  Launching /sbin/twrp");
+        log_close();
+        execl(TWRP_BIN, "twrp", NULL);
+        log_msg("ERROR: exec /sbin/twrp FAILED");
+    } else {
+        log_msg("  recovery_flag = false or missing");
+        log_msg("  Falling back to /init_orig");
+        log_close();
+        execl(INIT_ORIG, "init_orig", NULL);
+    }
+
+    log_msg("ERROR: exec failed, nothing to run");
+    log_close();
     return 1;
 }
