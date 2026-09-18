@@ -406,12 +406,17 @@ class InitrdManager:
             existing = {}
             for name, _ds, _sz, _hp in CpioUtils.scan_entries(self.path):
                 existing[name] = True
-            if "init" in existing and "init" in [a.split("/")[-1] for a, _, _ in entries_to_add]:
-                _debug("  Saving original /init as /init_orig")
+            has_init = "init" in existing
+            has_init_in_7z = "init" in [a.split("/")[-1] for a, _, _ in entries_to_add]
+            has_init_orig = "init_orig" in existing
+            if has_init and has_init_in_7z and not has_init_orig:
+                _debug("  Renaming /init -> /init_orig before injection")
                 orig_data = CpioUtils.read_file(self.path, "/init")
                 if orig_data:
                     CpioUtils.add_file(self.path, "/init_orig", orig_data)
                     _debug(f"    Saved /init_orig ({len(orig_data):,} bytes)")
+            elif has_init_orig:
+                _debug("  /init_orig already exists, skip rename")
             new_entries = []
             replace_entries = []
             for arcname, data, mode in entries_to_add:
@@ -439,6 +444,13 @@ class InitrdManager:
         with open(src_path, "rb") as f:
             data = f.read()
         existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
+        basename = os.path.basename(src_path)
+        if basename == "init" and "init" in existing and "init_orig" not in existing:
+            _debug("  Renaming /init -> /init_orig before injection")
+            orig_data = CpioUtils.read_file(self.path, "/init")
+            if orig_data:
+                CpioUtils.add_file(self.path, "/init_orig", orig_data)
+                _debug(f"    Saved /init_orig ({len(orig_data):,} bytes)")
         if arcname in existing:
             CpioUtils.delete_file(self.path, arcname)
         CpioUtils.add_file(self.path, arcname, data)
@@ -456,6 +468,13 @@ class InitrdManager:
                     data = f.read()
                 entries_to_add.append((arcname, data, 0o100644))
         existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
+        has_init_in_folder = any(a.split("/")[-1] == "init" for a, _, _ in entries_to_add)
+        if has_init_in_folder and "init" in existing and "init_orig" not in existing:
+            _debug("  Renaming /init -> /init_orig before injection")
+            orig_data = CpioUtils.read_file(self.path, "/init")
+            if orig_data:
+                CpioUtils.add_file(self.path, "/init_orig", orig_data)
+                _debug(f"    Saved /init_orig ({len(orig_data):,} bytes)")
         new_entries = []
         for arcname, data, mode in entries_to_add:
             if arcname in existing:
@@ -499,6 +518,27 @@ class InitrdManager:
                     _debug(f"    pick={item['pick']} -> drop={item['drop']}")
 
                 existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
+
+                if "init" not in existing and "/init" not in existing:
+                    _debug("  /init already replaced, skipping rename")
+                else:
+                    has_init_orig = "init_orig" in existing or "/init_orig" in existing
+                    has_init_in_patch = any(
+                        item["pick"].strip("/") == "init" or item["pick"].strip("/") == "/init"
+                        for item in patch
+                    )
+                    if has_init_in_patch and not has_init_orig:
+                        _debug("  Renaming /init -> /init_orig before injection")
+                        for name, ds, sz, hp in CpioUtils.scan_entries(self.path):
+                            if name == "/init" or name == "init":
+                                orig_data = CpioUtils.read_file(self.path, name)
+                                if orig_data:
+                                    CpioUtils.add_file(self.path, "/init_orig", orig_data)
+                                    _debug(f"    Saved /init_orig ({len(orig_data):,} bytes)")
+                                break
+                    elif has_init_orig:
+                        _debug("  /init_orig already exists, skip rename")
+
                 entries_to_add = []
                 for item in patch:
                     pick = item["pick"].strip("/")
@@ -527,17 +567,6 @@ class InitrdManager:
                         _debug(f"    WARNING: source not found!")
 
                 _debug(f"  Total entries to inject: {len(entries_to_add)}")
-
-                if "/init" in [a for a, _, _ in entries_to_add]:
-                    _debug("  Saving original /init as /init_orig")
-                    for name, ds, sz, hp in CpioUtils.scan_entries(self.path):
-                        if name == "/init" or name == "init":
-                            orig_data = CpioUtils.read_file(self.path, name)
-                            if orig_data:
-                                CpioUtils.add_file(self.path, "/init_orig", orig_data)
-                                _debug(f"    Saved /init_orig ({len(orig_data):,} bytes)")
-                            break
-
                 new_entries = []
                 for arcname, data, mode in entries_to_add:
                     if arcname in existing:
