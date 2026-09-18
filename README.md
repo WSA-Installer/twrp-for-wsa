@@ -12,7 +12,7 @@
 ![WSA](https://img.shields.io/badge/WSA-2404.40000.2.0+-green?style=for-the-badge)
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Windows_10%2F11-0078D4?style=for-the-badge&logo=windows&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
+![License](https://img.shields.io/badge/License-Source--Available-blue?style=for-the-badge)
 
 **One-click TWRP recovery injected into WSA — toggle between recovery and Android with a single command.**
 
@@ -531,7 +531,7 @@ The TWRP recovery image is built automatically from source:
 
 ## License
 
-This project is licensed under the **MIT License** — see [LICENSE](LICENSE) for details.
+This project is licensed under the **Source-Available / Community-Extension License** — see [LICENSE](LICENSE) for details.
 
 <br>
 
