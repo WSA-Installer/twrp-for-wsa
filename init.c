@@ -43,7 +43,7 @@
 #define TWRP_BIN        "/sbin/twrp"
 #define INIT_ORIG       "/init_orig"
 #define LOG_RAMDISK     "/tmp/twrp_debug.log"
-#define LOG_WIN_TEMP    "/mnt/c/Users/CYBERBU~1/AppData/Local/Temp/twrp_debug.log"
+#define LOG_WIN_TEMP    "/mnt/c/Windows/Temp/twrp_debug.log"
 
 static int log_fd = -1;
 
