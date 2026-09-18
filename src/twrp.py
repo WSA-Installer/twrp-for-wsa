@@ -64,6 +64,10 @@ def _debug(msg):
         print(f"  [DEBUG] {msg}", flush=True)
 
 
+def _log(msg):
+    print(f"  [INFO] {msg}", flush=True)
+
+
 BASE_DIR = Path(__file__).resolve().parent
 LOGO_PATH = BASE_DIR / "assets" / "wsa_twrp_logo.png"
 
@@ -406,17 +410,6 @@ class InitrdManager:
             existing = {}
             for name, _ds, _sz, _hp in CpioUtils.scan_entries(self.path):
                 existing[name] = True
-            has_init = "init" in existing
-            has_init_in_7z = "init" in [a.split("/")[-1] for a, _, _ in entries_to_add]
-            has_init_orig = "init_orig" in existing
-            if has_init and has_init_in_7z and not has_init_orig:
-                _debug("  Renaming /init -> /init_orig before injection")
-                orig_data = CpioUtils.read_file(self.path, "/init")
-                if orig_data:
-                    CpioUtils.add_file(self.path, "/init_orig", orig_data)
-                    _debug(f"    Saved /init_orig ({len(orig_data):,} bytes)")
-            elif has_init_orig:
-                _debug("  /init_orig already exists, skip rename")
             new_entries = []
             replace_entries = []
             for arcname, data, mode in entries_to_add:
@@ -444,13 +437,6 @@ class InitrdManager:
         with open(src_path, "rb") as f:
             data = f.read()
         existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
-        basename = os.path.basename(src_path)
-        if basename == "init" and "init" in existing and "init_orig" not in existing:
-            _debug("  Renaming /init -> /init_orig before injection")
-            orig_data = CpioUtils.read_file(self.path, "/init")
-            if orig_data:
-                CpioUtils.add_file(self.path, "/init_orig", orig_data)
-                _debug(f"    Saved /init_orig ({len(orig_data):,} bytes)")
         if arcname in existing:
             CpioUtils.delete_file(self.path, arcname)
         CpioUtils.add_file(self.path, arcname, data)
@@ -468,13 +454,6 @@ class InitrdManager:
                     data = f.read()
                 entries_to_add.append((arcname, data, 0o100644))
         existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
-        has_init_in_folder = any(a.split("/")[-1] == "init" for a, _, _ in entries_to_add)
-        if has_init_in_folder and "init" in existing and "init_orig" not in existing:
-            _debug("  Renaming /init -> /init_orig before injection")
-            orig_data = CpioUtils.read_file(self.path, "/init")
-            if orig_data:
-                CpioUtils.add_file(self.path, "/init_orig", orig_data)
-                _debug(f"    Saved /init_orig ({len(orig_data):,} bytes)")
         new_entries = []
         for arcname, data, mode in entries_to_add:
             if arcname in existing:
@@ -510,34 +489,39 @@ class InitrdManager:
 
             patch_path = os.path.join(tmpdir, "patch.json")
             if os.path.exists(patch_path):
-                _debug(f"  Reading patch.json: {patch_path}")
+                _log(f"Reading patch.json")
+                _debug(f"Path: {patch_path}")
                 with open(patch_path, "r") as f:
                     patch = json.load(f)
-                _debug(f"  patch.json has {len(patch)} entries:")
+                _log(f"patch.json has {len(patch)} entries")
                 for item in patch:
-                    _debug(f"    pick={item['pick']} -> drop={item['drop']}")
+                    _debug(f"  pick={item['pick']} -> drop={item['drop']}")
 
                 existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
 
-                if "init" not in existing and "/init" not in existing:
-                    _debug("  /init already replaced, skipping rename")
-                else:
-                    has_init_orig = "init_orig" in existing or "/init_orig" in existing
-                    has_init_in_patch = any(
-                        item["pick"].strip("/") == "init" or item["pick"].strip("/") == "/init"
-                        for item in patch
-                    )
-                    if has_init_in_patch and not has_init_orig:
-                        _debug("  Renaming /init -> /init_orig before injection")
+                rename_items = [item for item in patch if "rename" in item]
+                for item in rename_items:
+                    orig_name = item.get("original-name", "").strip("/")
+                    rename_to = item["rename"].strip("/")
+                    _debug(f"  Rename rule: {orig_name} -> {rename_to}")
+                    if not orig_name:
+                        _debug(f"    SKIP: missing original-name")
+                        continue
+                    already_renamed = rename_to in existing
+                    orig_exists = orig_name in existing
+                    if already_renamed:
+                        _log(f"/{rename_to} already exists, skip rename")
+                    elif not orig_exists:
+                        _debug(f"    SKIP: /{orig_name} not found in cpio")
+                    else:
+                        _log(f"Renaming /{orig_name} -> /{rename_to}")
                         for name, ds, sz, hp in CpioUtils.scan_entries(self.path):
-                            if name == "/init" or name == "init":
+                            if name == f"/{orig_name}" or name == orig_name:
                                 orig_data = CpioUtils.read_file(self.path, name)
                                 if orig_data:
-                                    CpioUtils.add_file(self.path, "/init_orig", orig_data)
-                                    _debug(f"    Saved /init_orig ({len(orig_data):,} bytes)")
+                                    CpioUtils.add_file(self.path, f"/{rename_to}", orig_data)
+                                    _log(f"  Saved /{rename_to} ({len(orig_data):,} bytes)")
                                 break
-                    elif has_init_orig:
-                        _debug("  /init_orig already exists, skip rename")
 
                 entries_to_add = []
                 for item in patch:
