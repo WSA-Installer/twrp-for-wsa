@@ -388,6 +388,7 @@ twrp-for-wsa/
 ├── requirements.txt         # Python dependencies
 ├── LICENSE                  # MIT License
 ├── CONTRIBUTING.md          # Contribution guidelines
+├── CHANGELOG.md             # Version history
 └── README.md                # This file
 ```
 
@@ -449,6 +450,7 @@ The TWRP recovery image is built automatically from source:
 | [Architecture](docs/architecture.md) | How TWRP for WSA works internally |
 | [Supported Images](docs/supported-images.md) | All 7 WSA variant details |
 | [Troubleshooting](docs/troubleshooting.md) | Common issues and solutions |
+| [Changelog](CHANGELOG.md) | Version history and release notes |
 
 <br>
 
