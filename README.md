@@ -1,7 +1,7 @@
 <div align="center">
 
 <a href="https://github.com/WSA-Installer/twrp-for-wsa">
-  <img src="https://raw.githubusercontent.com/gshellmr-code/twrp-builder-wsa/master/assets/twrp.png" alt="TWRP for WSA" width="120">
+  <img src="https://raw.githubusercontent.com/WSA-Installer/twrp-for-wsa/main/assets/twrp.png" alt="TWRP for WSA" width="120">
 </a>
 
 # TWRP for WSA
@@ -10,7 +10,7 @@
 
 ![Version](https://img.shields.io/badge/version-4.1.0-blue?style=for-the-badge)
 ![WSA](https://img.shields.io/badge/WSA-2404.40000.2.0+-green?style=for-the-badge)
-![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Windows_10%2F11-0078D4?style=for-the-badge&logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
 
@@ -235,7 +235,7 @@ twrp.exe --enable-twrp --path D:\WSA\initrd.img
 flowchart TD
     A[WSA Kernel] --> B["/init (Dispatcher ELF)"]
     B --> C{Reads /info.json}
-    C -->|"recovery_flag: true"| D["/overlay.d/sbin/twrp"]
+    C -->|"recovery_flag: true (case-insensitive)"| D["/sbin/twrp"]
     C -->|"recovery_flag: false"| E["/lspinit → /wsainit → Android"]
     D --> F[TWRP Recovery Boots]
     E --> G[Android Boots Normally]
@@ -266,10 +266,10 @@ flowchart TD
 1. **WSA kernel loads `initrd.img`** from the WSA installation directory
 2. **Dispatcher (`/init`) executes** — a small ELF binary compiled from `init.c`
 3. **Dispatcher reads `/info.json`** from the ramdisk
-4. **If `recovery_flag` is `"True"` or `"true"`:**
-   - Dispatcher executes `/overlay.d/sbin/twrp`
+4. **If `recovery_flag` is `"true"` (case-insensitive):**
+   - Dispatcher executes `/sbin/twrp`
    - TWRP recovery boots with full touch interface
-5. **If `recovery_flag` is `"false"` or `"False"`:**
+5. **If `recovery_flag` is `"false"` (case-insensitive):**
    - Dispatcher executes `/lspinit` → `/wsainit`
    - Android boots normally
 
@@ -375,19 +375,30 @@ twrp-for-wsa/
 │   ├── installation.md      # Installation guide
 │   ├── commands.md          # CLI reference
 │   ├── architecture.md      # How it works internally
+│   ├── flow.md              # Boot and inject flow
+│   ├── cli-reference.md     # Detailed CLI reference
+│   ├── developer-guide.md   # Contributing guide
+│   ├── adb.md               # ADB commands for TWRP
+│   ├── variants.md          # WSA image variants
 │   ├── supported-images.md  # All 7 WSA variant details
-│   └── troubleshooting.md   # Common issues and fixes
+│   ├── troubleshooting.md   # Common issues and fixes
+│   └── faq.md               # Frequently asked questions
 ├── assets/
 │   └── twrp.png             # Project logo
 ├── .github/
-│   └── workflows/
-│       └── build-twrp.yml   # GitHub Actions build workflow
+│   ├── workflows/
+│   │   └── build-twrp.yml   # GitHub Actions build workflow
+│   └── PULL_REQUEST_TEMPLATE.md
 ├── init.c                   # Dispatcher source (compiled to ELF with musl-gcc)
 ├── info.json                # TWRP metadata template
 ├── patch.json               # Cpio injection map
 ├── requirements.txt         # Python dependencies
-├── LICENSE                  # MIT License
+├── CODE_OF_CONDUCT.md       # Code of conduct
+├── SECURITY.md              # Security policy
+├── SUPPORT.md               # Support and FAQ
+├── ROADMAP.md               # Planned features
 ├── CONTRIBUTING.md          # Contribution guidelines
+├── LICENSE                  # MIT License
 ├── CHANGELOG.md             # Version history
 └── README.md                # This file
 ```
@@ -426,7 +437,7 @@ python src/twrp.py --enable-twrp
 
 The TWRP recovery image is built automatically from source:
 
-1. Go to [Actions](https://github.com/gshellmr-code/twrp-builder-wsa/actions)
+1. Go to [Actions](https://github.com/WSA-Installer/twrp-builder-wsa/actions)
 2. Click **Build TWRP x86_64 for WSA**
 3. Click **Run workflow**
 4. Wait ~60 minutes
@@ -447,10 +458,19 @@ The TWRP recovery image is built automatically from source:
 |:---------|:------------|
 | [Installation Guide](docs/installation.md) | Step-by-step installation instructions |
 | [CLI Commands](docs/commands.md) | Full reference for all twrp.exe commands |
+| [CLI Reference](docs/cli-reference.md) | Detailed CLI reference with examples |
+| [Boot & Inject Flow](docs/flow.md) | Complete boot and injection flow |
 | [Architecture](docs/architecture.md) | How TWRP for WSA works internally |
+| [ADB Commands](docs/adb.md) | ADB commands for TWRP recovery |
+| [WSA Variants](docs/variants.md) | All 7 custom WSA image variants |
 | [Supported Images](docs/supported-images.md) | All 7 WSA variant details |
+| [Developer Guide](docs/developer-guide.md) | Contributing and development setup |
+| [FAQ](docs/faq.md) | Frequently asked questions |
 | [Troubleshooting](docs/troubleshooting.md) | Common issues and solutions |
 | [Changelog](CHANGELOG.md) | Version history and release notes |
+| [Security Policy](SECURITY.md) | Vulnerability reporting and security |
+| [Support](SUPPORT.md) | Support channels and FAQ |
+| [Roadmap](ROADMAP.md) | Planned features |
 
 <br>
 
@@ -460,10 +480,10 @@ The TWRP recovery image is built automatically from source:
 
 | Issue | Solution |
 |:------|:---------|
-| ADB shows "device" (not "recovery") | Run `twrp.exe --enable-twrp` and reboot |
+| ADB shows "device" (not "recovery") | TWRP not booted yet — restart WSA after enabling TWRP mode |
 | TWRP not booting | Check if `twrp.exe --status` shows `recovery_flag: true` |
 | Initrd.img not found | WSA must be installed first; check WSA installation path |
-| ADB not connecting | Enable Developer Mode + ADB Debugging in WSA settings |
+| ADB not connecting | Restart ADB server; enable Developer Mode only if needed for Android access |
 | Want to restore original | `twrp.exe --disable-twrp` reverts to normal Android boot |
 
 > Full troubleshooting guide: [docs/troubleshooting.md](docs/troubleshooting.md)
@@ -474,7 +494,7 @@ The TWRP recovery image is built automatically from source:
 
 <div align="center">
 
-![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![PySide6](https://img.shields.io/badge/PySide6-GUI-41CD52?style=for-the-badge)
 ![C](https://img.shields.io/badge/C-Dispatcher-A8B9CC?style=for-the-badge&logo=c&logoColor=white)
 ![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-CI-2088FF?style=for-the-badge&logo=github-actions&logoColor=white)

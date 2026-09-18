@@ -44,8 +44,8 @@ WSA Kernel
 WSA Kernel
   └── /init (custom dispatcher ELF)
         ├── Reads /info.json
-        ├── If recovery_flag == "true":
-        │     └── exec /overlay.d/sbin/twrp
+        ├── If recovery_flag == "true" (case-insensitive):
+        │     └── exec /sbin/twrp
         │           └── TWRP Recovery boots
         └── If recovery_flag == "false":
               └── exec /lspinit
@@ -60,8 +60,8 @@ flowchart TD
     A[WSA Kernel] --> B["/init (Dispatcher ELF)"]
     B --> C[Reads /info.json]
     C --> D{recovery_flag?}
-    D -->|"true / True"| E["exec /overlay.d/sbin/twrp"]
-    D -->|"false / False"| F["exec /lspinit"]
+    D -->|"true (case-insensitive)"| E["exec /sbin/twrp"]
+    D -->|"false (case-insensitive)"| F["exec /lspinit"]
     E --> G[TWRP Recovery Boots]
     F --> H["/wsainit → Android"]
     G --> I[Full Touch Recovery]
@@ -93,27 +93,27 @@ flowchart TD
 | Linker | `/sbin/linker64` | ~1 MB | Android dynamic linker for TWRP |
 | Theme | `/twres/` | ~500 KB | TWRP UI theme and resources |
 | Libraries | `/system/lib64/` | ~5 MB | Android shared libraries (liblog, etc.) |
-| Overlay | `/overlay.d/sbin/twrp` | (symlink) | Location where dispatcher finds TWRP |
 
 ### Dispatcher (init.c)
 
 The dispatcher is a small C program compiled as a static ELF binary using `musl-gcc`:
 
 ```c
-// Simplified logic
+// Simplified logic (see init.c for actual implementation)
 int main() {
     // Read /info.json
-    char *json = read_file("/info.json");
-
-    // Check recovery_flag (supports both "true" and "True")
-    if (has_flag(json, "recovery_flag", "true") ||
-        has_flag(json, "recovery_flag", "True")) {
-        // Boot TWRP
-        exec("/overlay.d/sbin/twrp");
-    } else {
-        // Boot Android
-        exec("/lspinit");
+    char buf[1024];
+    if (read_file("/info.json", buf, sizeof(buf)) > 0) {
+        // Case-insensitive check for "recovery_flag": "true"
+        if (cistrstr(buf, "\"recovery_flag\": \"true\"")) {
+            // Boot TWRP
+            execl("/sbin/twrp", "twrp", NULL);
+        }
     }
+    // Boot Android
+    execl("/lspinit", "lspinit", NULL);
+    execl("/wsainit", "wsainit", NULL);
+    return 1;
 }
 ```
 
@@ -184,15 +184,16 @@ WSA's `initrd.img` is a [cpio archive](https://www.gnu.org/software/cpio/) in **
 
 | Method | Description |
 |:-------|:------------|
-| `extract()` | Reads cpio entries into memory as a dict `{name: bytes}` |
-| `replace_bytes()` | In-place byte replacement (same length required) |
-| `inject_file()` | Adds a new file entry or replaces existing |
-| `inject_folder()` | Adds all files from a directory |
+| `scan_entries()` | Reads cpio entries into memory as a dict `{name: bytes}` |
+| `read_file()` | Reads a single file entry from the cpio archive |
+| `add_file()` | Adds a new file entry or replaces existing |
+| `add_files()` | Adds all files from a directory recursively |
+| `delete_file()` | Removes a file entry from the cpio archive |
 | `pack()` | Writes modified entries back to cpio format |
 
 ### In-Place Replacement Constraint
 
-The `replace_bytes()` method requires **same byte count** for old and new values. This is why `info.json` uses padding:
+The flag toggle uses **same-length byte replacement** within the cpio entry. This is why `info.json` uses padding:
 
 ```json
 "recovery_flag": "true" 
@@ -218,12 +219,7 @@ Similarly for capitalized variants:
 
 ### Compression
 
-WSA's `initrd.img` may be:
-- **Uncompressed** — raw cpio (no header check needed)
-- **Gzipped** — `gzip` compressed cpio (decompress before patching)
-- **LZ4** — `lz4` compressed (decompress before patching)
-
-The tool detects compression automatically and decompresses/recompresses as needed.
+WSA's `initrd.img` is typically a **raw cpio** archive (no compression). The tool reads and writes the cpio format directly.
 
 ---
 

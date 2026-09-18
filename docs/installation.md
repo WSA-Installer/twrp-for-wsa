@@ -81,8 +81,7 @@ twrp.exe --inject twrp.7z
 1. Extracts `twrp.7z` to a temporary directory
 2. Reads `patch.json` to understand file mapping
 3. Locates WSA's `initrd.img` in the WSA installation directory
-4. Copies the original `initrd.img` as backup
-5. Injects TWRP files into the cpio archive:
+4. Injects TWRP files into the cpio archive:
    - `/init` — Custom dispatcher ELF binary
    - `/info.json` — Metadata with recovery flag
    - `/sbin/twrp` — Main TWRP binary
@@ -202,14 +201,15 @@ Or terminate WSA from Windows Settings and relaunch it.
 
 ## Restore Original initrd.img
 
-The injector creates a backup of the original `initrd.img` during injection. To restore:
+To disable TWRP and revert to normal Android boot:
 
 ```cmd
 twrp.exe --disable-twrp
-twrp.exe --status
 ```
 
-If you need to manually restore the backup, look for the `.bak` file in the WSA installation directory and rename it back to `initrd.img`.
+Then restart WSA. The dispatcher will read `recovery_flag: "false"` and boot Android normally.
+
+> **Note:** TWRP for WSA does not create a separate backup file. The `--disable-twrp` command modifies the `recovery_flag` in `info.json` within the existing initrd.img. If you need to completely remove TWRP, re-inject a clean initrd.img from your WSA installation.
 
 ---
 

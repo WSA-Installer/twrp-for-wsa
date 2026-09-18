@@ -20,12 +20,15 @@ Common issues and solutions for TWRP for WSA.
 
 **Symptom:** After enabling TWRP, `adb devices` shows `device` instead of `recovery`.
 
+**Cause:** TWRP recovery has not booted yet. The `recovery` status only appears when TWRP is actively running.
+
 **Solution:**
 
 1. Verify the flag is set: `twrp.exe --status`
 2. Ensure `recovery_flag` shows `true`
 3. If not enabled, run: `twrp.exe --enable-twrp`
-4. Restart WSA: `adb reboot recovery` or terminate from Windows Settings
+4. Restart WSA: terminate from Windows Settings and relaunch, or run `adb reboot recovery`
+5. TWRP recovery auto-starts on next boot — no need to enable Developer Mode or ADB Debugging for recovery detection
 
 ### ADB not connecting at all
 
@@ -33,10 +36,10 @@ Common issues and solutions for TWRP for WSA.
 
 **Solution:**
 
-1. Enable **Developer Mode** in WSA Settings
-2. Enable **ADB debugging** in WSA Settings
-3. Restart ADB: `adb kill-server && adb start-server`
-4. Connect manually: `adb connect 127.0.0.1:58526`
+1. Restart ADB: `adb kill-server && adb start-server`
+2. Connect manually: `adb connect 127.0.0.1:58526`
+3. If connecting to TWRP recovery, ensure WSA is restarted after enabling TWRP mode
+4. Enable **Developer Mode** and **ADB Debugging** in WSA Settings only if you need ADB access to Android (not required for TWRP recovery)
 
 ### ADB shows "unauthorized"
 
@@ -93,7 +96,7 @@ Common issues and solutions for TWRP for WSA.
 
 1. Run with debug: `twrp.exe --inject twrp.7z --debug`
 2. Check if patch.json is present in twrp.7z
-3. Verify the initrd.img backup was created (.bak file)
+3. Verify the initrd.img was modified: `twrp.exe --status`
 
 ---
 
