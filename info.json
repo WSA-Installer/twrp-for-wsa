@@ -1,0 +1,11 @@
+{
+  "twrp_support": "true",
+  "gapp_support": "Unknown",
+  "root_support": "Unknown",
+  "root_method": "Unknown",
+  "amazon_support": "Unknown",
+  "build_version": "3.1.0",
+  "wsa_version": "Unknown",
+  "recovery_flag": "false",
+  "note": ""
+}

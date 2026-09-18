@@ -18,7 +18,7 @@
 
 Part of the [WSA Installer](https://github.com/WSA-Installer) organization.
 
-[Download twrp.exe](https://github.com/WSA-Installer/twrp-for-wsa/releases/latest) · [Installation Guide](docs/installation.md) · [Commands](docs/commands.md) · [Architecture](docs/architecture.md)
+[Download twrp.exe](https://github.com/WSA-Installer/twrp-for-wsa/releases/latest) · [Installation Guide](docs/installation.md) · [Commands](docs/commands.md) · [Architecture](docs/architecture.md) · [Source Code](src/twrp.py)
 
 </div>
 
@@ -361,27 +361,75 @@ graph TB
 
 <br>
 
-## Build from Source
+## Source Code
 
-TWRP for WSA is built automatically via GitHub Actions.
+TWRP for WSA is fully open source. The main tool is `src/twrp.py`.
 
-### Automated Build (GitHub Actions)
+### Project Structure
+
+```
+twrp-for-wsa/
+├── src/
+│   └── twrp.py              # Main CLI tool (~1500 lines)
+├── docs/
+│   ├── installation.md      # Installation guide
+│   ├── commands.md          # CLI reference
+│   ├── architecture.md      # How it works internally
+│   ├── supported-images.md  # All 7 WSA variant details
+│   └── troubleshooting.md   # Common issues and fixes
+├── assets/
+│   └── twrp.png             # Project logo
+├── .github/
+│   └── workflows/
+│       └── build-twrp.yml   # GitHub Actions build workflow
+├── init.c                   # Dispatcher source (compiled to ELF with musl-gcc)
+├── info.json                # TWRP metadata template
+├── patch.json               # Cpio injection map
+├── requirements.txt         # Python dependencies
+├── LICENSE                  # MIT License
+├── CONTRIBUTING.md          # Contribution guidelines
+└── README.md                # This file
+```
+
+### Requirements
+
+| Requirement | Version |
+|:------------|:--------|
+| Python | 3.10+ |
+| PySide6 | 6.5+ |
+| Windows | 10 (build 19041+) or 11 |
+| WSA | Installed and functional |
+| ADB | Platform tools installed |
+
+### Install & Run
+
+```bash
+# Clone
+git clone https://github.com/WSA-Installer/twrp-for-wsa.git
+cd twrp-for-wsa
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Check status
+python src/twrp.py --status
+
+# Inject TWRP
+python src/twrp.py --inject twrp.7z
+
+# Enable TWRP mode
+python src/twrp.py --enable-twrp
+```
+
+### Build TWRP Recovery Image (GitHub Actions)
+
+The TWRP recovery image is built automatically from source:
 
 1. Go to [Actions](https://github.com/gshellmr-code/twrp-builder-wsa/actions)
 2. Click **Build TWRP x86_64 for WSA**
 3. Click **Run workflow**
 4. Wait ~60 minutes
 5. Download `twrp-x86_64-wsa` artifact
-
-### What the Build Does
-
-| Step | Action |
-|:-----|:-------|
-| 1. Sync | Downloads AOSP + TWRP 14.1 source via `repo sync` |
-| 2. Device Tree | Creates x86_64 emulator device configuration |
-| 3. Compile | Builds TWRP recovery image (`make recoveryimage`) |
-| 4. Package | Extracts ramdisk, compiles dispatcher, packages twrp.7z |
-| 5. Upload | Publishes to GitHub Release and artifact store |
 
 ### Build Output
 
@@ -420,13 +468,27 @@ TWRP for WSA is built automatically via GitHub Actions.
 
 <br>
 
+## Tech Stack
+
+<div align="center">
+
+![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![PySide6](https://img.shields.io/badge/PySide6-GUI-41CD52?style=for-the-badge)
+![C](https://img.shields.io/badge/C-Dispatcher-A8B9CC?style=for-the-badge&logo=c&logoColor=white)
+![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-CI-2088FF?style=for-the-badge&logo=github-actions&logoColor=white)
+![ADB](https://img.shields.io/badge/ADB-Bridge-3DDC84?style=for-the-badge)
+
+</div>
+
+<br>
+
 ## Community
 
 <div align="center">
 
 [![YouTube](https://img.shields.io/badge/YouTube-AT_Tech_Zone-red?style=for-the-badge&logo=youtube)](https://www.youtube.com/@AT_Tech_Zone)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-donate-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://buymeacoffee.com/mrcyberdev)
-[![GitHub](https://img.shields.io/badge/GitHub-Organization-1B72C0?style=for-the-badge&logo=github)](https://github.com/WSA-Installer)
+[![GitHub](https://img.shields.io/badge/GitHub-WSA--Installer-1B72C0?style=for-the-badge&logo=github)](https://github.com/WSA-Installer)
 
 </div>
 
@@ -434,10 +496,12 @@ TWRP for WSA is built automatically via GitHub Actions.
 
 ## Credits
 
-| Project | Maintainer | Role |
-|:--------|:-----------|:-----|
+| Component | Source | Role |
+|:----------|:-------|:-----|
 | TWRP | [TeamWin](https://twrp.me) | Recovery project |
 | TWRP Source Build | [minimal-manifest-twrp](https://github.com/minimal-manifest-twrp) | TWRP AOSP manifest |
+| Dispatcher | `init.c` (this repo) | Boot decision binary (compiled with musl-gcc) |
+| CLI Tool | `src/twrp.py` (this repo) | Injection, toggle, status commands |
 | WSA Installer | [AT Tech Zone](https://www.youtube.com/@AT_Tech_Zone) | Parent project |
 | WSA Builds | [MustardChef/WSABuilds](https://github.com/MustardChef/WSABuilds) | Pre-built WSA archives |
 

@@ -1,0 +1,8 @@
+[
+  {"pick": "/init", "drop": "/"},
+  {"pick": "/info.json", "drop": "/"},
+  {"pick": "/sbin/", "drop": "/sbin/"},
+  {"pick": "/twres/", "drop": "/twres/"},
+  {"pick": "/etc/", "drop": "/etc/"},
+  {"pick": "/system/lib64/", "drop": "/system/lib64/"}
+]

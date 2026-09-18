@@ -1,0 +1,265 @@
+name: Build TWRP x86_64 for WSA
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest_branch:
+        description: 'TWRP manifest branch'
+        required: true
+        default: 'twrp-14.1'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          df -h
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -yq \
+            gperf gcc-multilib gcc-10-multilib g++-multilib g++-10-multilib \
+            libc6-dev lib32ncurses-dev x11proto-core-dev libx11-dev tree lib32z-dev libgl1-mesa-dev libxml2-utils \
+            xsltproc bc ccache lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev \
+            build-essential libgtk-3-dev libglu1-mesa-dev freeglut3-dev git libxml2 lzop pngcrush schedtool squashfs-tools \
+            imagemagick libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev libncurses6 python3 tar
+
+      - name: Install Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '11'
+
+      - name: Install Repo Tool
+        run: |
+          mkdir -p ~/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          sudo ln -sf ~/bin/repo /usr/bin/repo
+
+      - name: Initialize repo
+        run: |
+          mkdir workspace
+          cd workspace
+          git config --global user.name "CYBER-BUDDY"
+          git config --global user.email "gshellmr-code@users.noreply.github.com"
+          repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git \
+            -b ${{ github.event.inputs.manifest_branch || 'twrp-14.1' }}
+
+      - name: Repo Sync
+        run: |
+          cd workspace
+          repo sync -j$(nproc --all) --force-sync
+
+      - name: Create x86_64 device tree
+        run: |
+          cd workspace
+          mkdir -p device/emulator/twrpx8664
+
+          cat > device/emulator/twrpx8664/AndroidProducts.mk << 'EOF'
+          PRODUCT_MAKEFILES := \
+              $(LOCAL_DIR)/twrp_twrpx8664.mk
+          COMMON_LUNCH_CHOICES := \
+              twrp_twrpx8664-eng
+          EOF
+
+          cat > device/emulator/twrpx8664/twrp_twrpx8664.mk << 'EOF'
+          $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
+          $(call inherit-product, vendor/twrp/config/common.mk)
+          $(call inherit-product, device/emulator/twrpx8664/device.mk)
+
+          PRODUCT_DEVICE := twrpx8664
+          PRODUCT_NAME := twrp_twrpx8664
+          PRODUCT_BRAND := twrp
+          PRODUCT_MODEL := TWRP x86_64
+          PRODUCT_MANUFACTURER := TeamWin
+
+          TW_THEME := landscape_hdpi
+          TW_SCREEN_WIDTH := 1920
+          TW_SCREEN_HEIGHT := 1080
+          EOF
+
+          cat > device/emulator/twrpx8664/BoardConfig.mk << 'EOF'
+          TARGET_ARCH := x86_64
+          TARGET_ARCH_VARIANT := x86_64
+          TARGET_CPU_ABI := x86_64
+          TARGET_CPU_SMP := true
+          TARGET_2ND_ARCH := x86
+          TARGET_2ND_CPU_ABI := x86
+          TARGET_BOARD_PLATFORM := goldfish
+
+          TARGET_NO_BOOTLOADER := true
+          TARGET_NO_RADIOIMAGE := true
+          TARGET_NO_KERNEL := true
+          TARGET_NO_RECOVERY := false
+
+          BOARD_USES_MKE2FS := true
+          BOARD_HAS_LARGE_FILESYSTEM := true
+          TARGET_USERIMAGES_USE_EXT4 := true
+          BOARD_RECOVERYIMAGE_PARTITION_SIZE := 67108864
+          BOARD_FLASH_BLOCK_SIZE := 131072
+
+          BOARD_HAS_NO_REAL_SDCARD := true
+          RECOVERY_SDCARD_ON_DATA := true
+          TW_EXCLUDE_MTP := true
+          TW_USE_TOOLBOX := true
+          EOF
+
+          cat > device/emulator/twrpx8664/device.mk << 'EOF'
+          $(call inherit-product, $(SRC_TARGET_DIR)/product/x86_64.mk)
+
+          PRODUCT_NAME := twrp_twrpx8664
+          PRODUCT_DEVICE := twrpx8664
+          PRODUCT_BRAND := twrp
+          EOF
+
+          cat > device/emulator/twrpx8664/vendorsetup.sh << 'EOF'
+          EOF
+
+          echo "=== Device tree created ==="
+          ls -la device/emulator/twrpx8664/
+
+      - name: Set Swap Space
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 12
+
+      - name: Build Recovery Image
+        run: |
+          cd workspace
+          source build/envsetup.sh
+          export ALLOW_MISSING_DEPENDENCIES=true
+          lunch twrp_twrpx8664-eng
+          make recoveryimage -j$(nproc --all) 2>&1 | tee build.log
+          BUILD_EXIT=$?
+          echo "Build exit code: $BUILD_EXIT"
+          echo ""
+          echo "=== Build log tail ==="
+          tail -100 build.log
+          exit $BUILD_EXIT
+
+      - name: Find and package output
+        if: success()
+        run: |
+          cd workspace
+          mkdir -p /tmp/ramdisk
+
+          PRODUCT=$(find out/target/product -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)
+          echo "Product dir: $PRODUCT"
+
+          if [ -n "$PRODUCT" ]; then
+            ls -la "$PRODUCT"/ 2>/dev/null | head -30
+            echo ""
+            echo "=== Recovery files ==="
+            find "$PRODUCT" -maxdepth 1 \( -name "ramdisk-recovery*" -o -name "recovery.img" -o -name "*.img" \) 2>/dev/null
+
+            if [ -f "$PRODUCT/ramdisk-recovery.img" ]; then
+              echo "Extracting ramdisk-recovery.img..."
+              cd /tmp/ramdisk
+              cpio -idm < "$PRODUCT/ramdisk-recovery.img"
+            fi
+          fi
+
+          echo ""
+          echo "=== Ramdisk contents ==="
+          ls -la /tmp/ramdisk/ 2>/dev/null || echo "Empty"
+          ls -la /tmp/ramdisk/sbin/ 2>/dev/null || echo "No sbin"
+          ls -la /tmp/ramdisk/twres/ 2>/dev/null || echo "No twres"
+
+      - name: Compile dispatcher (init)
+        if: success()
+        run: |
+          sudo apt-get install -y musl-tools
+          if [ -f /tmp/ramdisk/sbin/twrp ] || [ -f /tmp/ramdisk/sbin/recovery ]; then
+            musl-gcc -static -o /tmp/ramdisk/init \
+              $GITHUB_WORKSPACE/init.c
+            echo "Dispatcher compiled"
+          else
+            echo "No TWRP binary found, creating fallback init"
+            printf '#!/sbin/sh\nexec /sbin/sh\n' > /tmp/ramdisk/init
+            chmod +x /tmp/ramdisk/init
+          fi
+          file /tmp/ramdisk/init
+
+      - name: Inject info.json and patch.json
+        if: success()
+        run: |
+          cp $GITHUB_WORKSPACE/info.json /tmp/ramdisk/info.json
+          cp $GITHUB_WORKSPACE/patch.json /tmp/ramdisk/patch.json
+
+      - name: Verify
+        if: success()
+        run: |
+          echo "=== All files ==="
+          find /tmp/ramdisk -type f | head -50
+          echo ""
+          echo "=== TWRP binary ==="
+          file /tmp/ramdisk/sbin/twrp 2>/dev/null || echo "twrp not found"
+          file /tmp/ramdisk/sbin/recovery 2>/dev/null || echo "recovery not found"
+          echo ""
+          echo "=== info.json ==="
+          cat /tmp/ramdisk/info.json
+
+      - name: Package twrp.7z
+        if: success()
+        run: |
+          cd /tmp/ramdisk
+          7z a /tmp/twrp.7z .
+          ls -la /tmp/twrp.7z
+
+      - name: Create twrp.img (cpio archive)
+        if: success()
+        run: |
+          cd /tmp/ramdisk
+          find . -print0 | cpio -o -0 -H newc 2>/dev/null > /tmp/twrp.img || \
+          find . | cpio -o -H newc 2>/dev/null > /tmp/twrp.img
+          ls -la /tmp/twrp.img
+
+      - name: Upload to GitHub Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            /tmp/twrp.7z
+            /tmp/twrp.img
+          name: "twrp-x86_64-wsa-${{ github.run_id }}"
+          tag_name: "build-${{ github.run_id }}"
+          body: |
+            TWRP x86_64 for WSA
+            
+            Build: ${{ github.run_id }}
+            Manifest: ${{ github.event.inputs.manifest_branch || 'twrp-14.1' }}
+            
+            **Files:**
+            - twrp.7z — TWRP ramdisk files for twrp.py --inject
+            - twrp.img — Raw cpio ramdisk image
+            
+            **Usage:**
+            ```
+            twrp.py --inject twrp.7z
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: twrp-x86_64-wsa
+          path: |
+            /tmp/twrp.7z
+            /tmp/twrp.img
+          retention-days: 30
