@@ -2489,6 +2489,60 @@ class WSATWRP:
         else:
             print("Recovery system: PRESENT (no info.json)")
 
+        if initrd.has_lsp_image():
+            print()
+            print(f"System Apps ({LSP_IMAGE_NAME})")
+            print("-" * 50)
+            extract_dir = initrd.extract_lsp_image()
+            if extract_dir:
+                perm_dir = os.path.join(extract_dir, "permissions")
+                priv_app = os.path.join(extract_dir, "system", "priv-app")
+                apk_pkgs = []
+                if os.path.isdir(priv_app):
+                    for pkg_dir in sorted(os.listdir(priv_app)):
+                        pkg_path = os.path.join(priv_app, pkg_dir)
+                        if os.path.isdir(pkg_path):
+                            apk_files = [f for f in os.listdir(pkg_path) if f.endswith(".apk")]
+                            if apk_files:
+                                apk_pkgs.append(pkg_dir)
+                profiles = {}
+                if os.path.isdir(perm_dir):
+                    for jf in os.listdir(perm_dir):
+                        if jf.endswith(".json"):
+                            pkg_name = jf[:-5]
+                            try:
+                                with open(os.path.join(perm_dir, jf)) as f:
+                                    profiles[pkg_name] = json.load(f)
+                            except Exception:
+                                pass
+                if not apk_pkgs:
+                    print("  (no system apps installed)")
+                else:
+                    for pkg in apk_pkgs:
+                        profile = profiles.get(pkg, {})
+                        hide_u = profile.get("hide_uninstall", True)
+                        hide_d = profile.get("hide_disable", True)
+                        privapp = profile.get("privapp_perms", [])
+                        runtime = profile.get("runtime_perms", [])
+                        print(f"  {pkg}")
+                        print(f"    Uninstall: {'hidden' if hide_u else 'visible'}")
+                        print(f"    Disable: {'hidden' if hide_d else 'visible'}")
+                        print(f"    Privileged: {len(privapp)} permissions")
+                        if privapp:
+                            for p in privapp:
+                                print(f"      - {p}")
+                        print(f"    Runtime: {len(runtime)} permissions")
+                        if runtime:
+                            for p in runtime:
+                                print(f"      - {p}")
+                        print()
+                shutil.rmtree(LSP_TEMP, ignore_errors=True)
+            else:
+                print("  Failed to extract image")
+        else:
+            print()
+            print(f"System Apps ({LSP_IMAGE_NAME}): NOT PRESENT")
+
 
 def _parse_into(args_list):
     if args_list is None:
