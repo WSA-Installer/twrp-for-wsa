@@ -763,6 +763,10 @@ class InitrdManager:
         if not os.path.exists(ASSET_FIX_7Z):
             _debug(f"fix.7z not found: {ASSET_FIX_7Z}")
             return False
+        existing_entries = {name for name, *_ in CpioUtils.scan_entries(self.path)}
+        if "overlay.d/sbin/post-fs-data.sh" in existing_entries:
+            _log("Magisk already installed, skipping hook infrastructure")
+            return True
         if os.path.exists(FIX_TEMP):
             shutil.rmtree(FIX_TEMP, ignore_errors=True)
         os.makedirs(FIX_TEMP, exist_ok=True)
@@ -774,11 +778,8 @@ class InitrdManager:
 
             _log("Adding Magisk hook infrastructure")
 
-            init_data = CpioUtils.read_file(self.path, "init")
-            if init_data:
-                CpioUtils.delete_file(self.path, "init")
-                CpioUtils.add_file(self.path, "/wsainit", init_data)
-                _log(f"  /init -> /wsainit ({len(init_data):,} bytes)")
+            CpioUtils.delete_file(self.path, "init")
+            _log("  Deleted /init (fix.7z provides wsainit)")
 
             lspinit_path = os.path.join(FIX_TEMP, "lspinit")
             if os.path.exists(lspinit_path):
