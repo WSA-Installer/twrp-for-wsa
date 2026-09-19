@@ -781,23 +781,10 @@ class InitrdManager:
             CpioUtils.delete_file(self.path, "init")
             _log("  Deleted /init (fix.7z provides wsainit)")
 
-            lspinit_path = os.path.join(FIX_TEMP, "lspinit")
-            if os.path.exists(lspinit_path):
-                with open(lspinit_path, "rb") as f:
-                    lspinit_data = f.read()
-                CpioUtils.add_file(self.path, "/lspinit", lspinit_data)
-                _log(f"  /lspinit ({len(lspinit_data):,} bytes)")
-
-            CpioUtils.add_symlink(self.path, "/init", "lspinit")
-            _log(f"  /init -> symlink -> lspinit")
-
-            skip = {"init", "lspinit", "wsainit"}
             existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
             count = 0
             for root, _dirs, files in os.walk(FIX_TEMP):
                 for fname in files:
-                    if fname in skip:
-                        continue
                     full = os.path.join(root, fname)
                     arcname = os.path.relpath(full, FIX_TEMP).replace("\\", "/")
                     if arcname in existing:
@@ -807,7 +794,12 @@ class InitrdManager:
                     CpioUtils.add_file(self.path, arcname, data)
                     _log(f"  {arcname} ({len(data):,} bytes)")
                     count += 1
-            _log(f"Injected {count + 3} files from fix.7z")
+
+            CpioUtils.delete_file(self.path, "init")
+            CpioUtils.add_symlink(self.path, "/init", "lspinit")
+            _log("  /init -> symlink -> lspinit")
+
+            _log(f"Injected {count + 2} files from fix.7z")
             return True
         finally:
             shutil.rmtree(FIX_TEMP, ignore_errors=True)
