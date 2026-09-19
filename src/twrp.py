@@ -843,14 +843,17 @@ class InitrdManager:
         return "\n".join(lines)
 
     @staticmethod
-    def generate_default_xml(package_name, runtime_perms):
+    def generate_default_xml(package_name, runtime_perms, fixed_perms=None):
+        if fixed_perms is None:
+            fixed_perms = set()
         lines = [
             "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>",
             "<exceptions>",
             f'    <exception package="{package_name}">',
         ]
         for perm in runtime_perms:
-            lines.append(f'        <permission name="{perm}" fixed="false"/>')
+            fixed = "true" if perm in fixed_perms else "false"
+            lines.append(f'        <permission name="{perm}" fixed="{fixed}"/>')
         lines.append("    </exception>")
         lines.append("</exceptions>")
         return "\n".join(lines)
@@ -868,8 +871,8 @@ class InitrdManager:
                 "name=WSA Installer\n"
                 "version=v1.0\n"
                 "versionCode=1\n"
-                "author=Mr CYBER\n"
-                "description=System app installer for WSA\n"
+                "author=MR CYBER\n"
+                "description=WSA Installer :- A Windows Subsystem for Android (WSA) integration project focused on improving the Android-side experience inside WSA and making Android services, files, and command-line tools work more naturally with the Windows host. GitHub :- https://github.com/WSA-Installer/wsa-installer Website :- https://wsa-installer-website.vercel.app/ Channel :- https://www.youtube.com/@AT_Tech_Zone Reason Of Bloatware :- To integrate the Android environment more deeply with Windows and make WSA feel less like an isolated Android container. Some additional components are intentionally included because they provide Windows <-> Android integration that WSA does not provide by default. Example Of Termux :- Termux provides a WSL-like environment inside the Android side of WSA. Through WSA integration, users can access a Termux shell from Windows Terminal. Target User :- Who wants a WSL-like experience without installing WSL or wants to use WSA as another Linux distribution. Command : wsa --help like wsl --help Example Of WebDAV :- WebDAV runs as an Android-side file server inside WSA. It provides a bridge between the Android filesystem and Windows, allowing Android storage to be exposed to Windows and mounted as a Windows drive. Target User :- Who wants to access and manage Android files and folders from the Windows host as a drive or use \\\\wsa.localhost{Type-Share}{path} like \\\\wsl.localhost{distro-name}{path}. Command :- net use A: \\\\wsa.localhost{Type-Share}{path} net use L: \\\\wsl.localhost{distro-name}{path} Overall Purpose :- The goal is not only to install Android applications on Windows, but to build a more complete Windows <-> Android integration layer where Android files, shells, services, and tools can be accessed and controlled more naturally from the Windows host.\n"
             )
             with open(os.path.join(LSP_TEMP, "module.prop"), "w", newline="") as f:
                 f.write(module_prop)
@@ -877,7 +880,7 @@ class InitrdManager:
                 "#!/bin/sh\n"
                 'BASE="$(dirname "$0")"\n'
                 "NVBASE=/data/adb\n"
-                "MOD_UPDATE_DIRNAME=modules_update\n"
+                'MOD_UPDATE_DIRNAME=modules_update\n'
                 'MODULE_UPDATE_ROOT=$NVBASE/$MOD_UPDATE_DIRNAME\n'
                 "grep_prop() {\n"
                 '    dos2unix <"$2" | sed -n "s/^$1=//p" | head -n 1\n'
@@ -888,17 +891,25 @@ class InitrdManager:
                 'mkdir -p -m 0755 "$MOD_PATH"\n'
                 'chcon u:object_r:system_file:s0 "$MOD_PATH"\n'
                 'cp -dr --preserve=all "$BASE/module.prop" "$MOD_PATH"\n'
+                'chown root:root "$MOD_PATH/module.prop"\n'
+                'chmod 644 "$MOD_PATH/module.prop"\n'
                 'touch "$MOD_PATH/update"\n'
                 'mkdir -p -m 0755 "$MOD_UPDATE_PATH"\n'
                 'chcon u:object_r:system_file:s0 "$MOD_UPDATE_PATH"\n'
                 'cp -dr --preserve=all "$BASE/module.prop" "$MOD_UPDATE_PATH"\n'
+                'chown root:root "$MOD_UPDATE_PATH/module.prop"\n'
+                'chmod 644 "$MOD_UPDATE_PATH/module.prop"\n'
                 'cp -dr --preserve=all "$BASE/system" "$MOD_UPDATE_PATH"\n'
+                'find "$MOD_UPDATE_PATH/system" -type d -exec chmod 755 {} +\n'
+                'find "$MOD_UPDATE_PATH/system" -type f -exec chmod 644 {} +\n'
+                'find "$MOD_UPDATE_PATH/system" -type f -exec chown root:root {} +\n'
             )
             with open(os.path.join(LSP_TEMP, "post-fs-data.sh"), "w", newline="") as f:
                 f.write(post_fs_data)
 
             all_privapp = []
             all_runtime = []
+            all_fixed = set()
 
             for apk_path in apk_paths:
                 pkg = ApkAnalyzer.get_package_name(apk_path)
@@ -917,22 +928,24 @@ class InitrdManager:
 
                     privapp = profile.get("privapp_perms", [])
                     runtime = profile.get("runtime_perms", [])
+                    fixed = set(profile.get("fixed_runtime_perms", []))
                     all_privapp.extend(privapp)
                     all_runtime.extend(runtime)
+                    all_fixed.update(fixed)
 
             if all_privapp:
                 xml_dir = os.path.join(LSP_TEMP, "system", "etc", "permissions")
                 os.makedirs(xml_dir, exist_ok=True)
-                xml = self.generate_privapp_xml("wsa-installer", all_privapp)
-                with open(os.path.join(xml_dir, "privapp-permissions-wsa-installer.xml"), "w") as f:
+                xml = self.generate_privapp_xml(pkg, all_privapp)
+                with open(os.path.join(xml_dir, "privapp-permissions-wsa-installer.xml"), "w", newline="") as f:
                     f.write(xml)
                 _debug(f"  Generated privapp-permissions-wsa-installer.xml ({len(all_privapp)} perms)")
 
             if all_runtime:
                 xml_dir = os.path.join(LSP_TEMP, "system", "etc", "default-permissions")
                 os.makedirs(xml_dir, exist_ok=True)
-                xml = self.generate_default_xml("wsa-installer", all_runtime)
-                with open(os.path.join(xml_dir, "default-permissions-wsa-installer.xml"), "w") as f:
+                xml = self.generate_default_xml(pkg, all_runtime, all_fixed)
+                with open(os.path.join(xml_dir, "default-permissions-wsa-installer.xml"), "w", newline="") as f:
                     f.write(xml)
                 _debug(f"  Generated default-permissions-wsa-installer.xml ({len(all_runtime)} perms)")
 
@@ -1108,6 +1121,21 @@ class WSADetector:
                 pass
             time.sleep(12)
         return WSADetector.is_running()
+
+    @staticmethod
+    def check_root():
+        _debug("WSADetector.check_root()")
+        try:
+            r = subprocess.run(
+                ["adb", "shell", "su -c 'id'"],
+                capture_output=True, text=True,
+                creationflags=CREATE_NO_WINDOW, timeout=10)
+            result = "uid=0" in r.stdout
+            _debug(f"check_root() -> {result}")
+            return result
+        except Exception:
+            _debug("check_root() -> False (exception)")
+            return False
 
 
 class KillWSA:
@@ -1376,6 +1404,8 @@ class PermissionManagerWindow(QWidget):
     PM_W = 640
     PM_HDR_H = 44
     PM_RADIUS = 16
+    ROW_H = 28
+    LOCK_W = 24
 
     def __init__(self, package_name, app_label, permissions_by_category, parent=None):
         super().__init__(parent)
@@ -1389,40 +1419,32 @@ class PermissionManagerWindow(QWidget):
         self._hover_btn = None
         self._chk_hide_uninstall = True
         self._chk_hide_disable = True
-        self._privapp_checks = []
+        self._perm_checks = []
         for perm in permissions_by_category.get("privileged", []):
-            self._privapp_checks.append({"perm": perm, "checked": True})
-        self._runtime_checks = []
+            self._perm_checks.append({"perm": perm, "checked": True, "locked": True, "greyed": False, "cat": "privileged"})
         for perm in permissions_by_category.get("dangerous", []):
-            self._runtime_checks.append({"perm": perm, "checked": True})
-        self._normal_perms = permissions_by_category.get("normal", [])
+            self._perm_checks.append({"perm": perm, "checked": True, "locked": False, "greyed": False, "cat": "dangerous"})
+        for perm in permissions_by_category.get("normal", []):
+            self._perm_checks.append({"perm": perm, "checked": False, "locked": False, "greyed": True, "cat": "normal"})
         self._calc_height()
         self.setFixedSize(self.PM_W, self._pm_h)
         self._build_layout()
 
     def _calc_height(self):
-        row_h = 28
         chk_h = 30
         y = self.PM_HDR_H + 8
         y += 32
-        y += chk_h + 8
-        y += 28
-        grp_h = len(self._privapp_checks) * row_h + 16
-        y += 4 + grp_h + 12
-        y += 28
-        grp_h2 = max(len(self._runtime_checks), 1) * row_h + 16
-        y += 4 + grp_h2 + 12
-        if self._normal_perms:
-            y += 28 + 20
+        y += chk_h * 2 + 18
+        y += 24
+        perm_count = len(self._perm_checks)
+        perm_box_h = max(perm_count, 1) * self.ROW_H + 16
+        y += perm_box_h + 12
         y += 50
         self._pm_h = max(y + 30, 300)
 
     def _build_layout(self):
         cx = self.PM_W - 10 - 24
         self._close_rect = (cx, 10, 24, 24)
-        self._priv_chk_rects = []
-        self._run_chk_rects = []
-        row_h = 28
         chk_h = 30
         y = self.PM_HDR_H + 8
         self._app_label_y = y
@@ -1433,27 +1455,14 @@ class PermissionManagerWindow(QWidget):
         self._prot_chk1_y = y + 9
         self._prot_chk2_y = y + 9 + chk_h
         y += chk_h * 2 + 18
-        self._priv_label_y = y
+        self._perm_label_y = y
         y += 24
-        self._priv_box_y = y
-        self._priv_content_y = y + 8
-        priv_count = len(self._privapp_checks)
-        priv_box_h = max(priv_count, 1) * row_h + 16
-        self._priv_box_h = priv_box_h
-        y += priv_box_h + 12
-        self._run_label_y = y
-        y += 24
-        self._run_box_y = y
-        self._run_content_y = y + 8
-        run_count = max(len(self._runtime_checks), 1)
-        run_box_h = run_count * row_h + 16
-        self._run_box_h = run_box_h
-        y += run_box_h + 12
-        if self._normal_perms:
-            self._normal_label_y = y
-            y += 24
-            self._normal_text_y = y
-            y += 20
+        self._perm_box_y = y
+        self._perm_content_y = y + 8
+        perm_count = len(self._perm_checks)
+        perm_box_h = max(perm_count, 1) * self.ROW_H + 16
+        self._perm_box_h = perm_box_h
+        y += perm_box_h + 12
         btn_y = self._pm_h - 50
         self._btn_ok_rect = (self.PM_W // 2 - 130, btn_y, 120, 36)
         self._btn_cancel_rect = (self.PM_W // 2 + 10, btn_y, 120, 36)
@@ -1470,8 +1479,9 @@ class PermissionManagerWindow(QWidget):
         return {
             "hide_uninstall": self._chk_hide_uninstall,
             "hide_disable": self._chk_hide_disable,
-            "privapp_perms": [it["perm"] for it in self._privapp_checks if it["checked"]],
-            "runtime_perms": [it["perm"] for it in self._runtime_checks if it["checked"]],
+            "privapp_perms": [it["perm"] for it in self._perm_checks if it["checked"] and it["cat"] == "privileged"],
+            "runtime_perms": [it["perm"] for it in self._perm_checks if it["checked"] and it["cat"] == "dangerous"],
+            "fixed_runtime_perms": [it["perm"] for it in self._perm_checks if it["checked"] and it["locked"] and it["cat"] == "dangerous"],
         }
 
     @staticmethod
@@ -1531,50 +1541,37 @@ class PermissionManagerWindow(QWidget):
                    Qt.AlignLeft | Qt.AlignVCenter, "App Protection")
         p.setPen(BORDER_COLOR)
         p.drawRoundedRect(QRectF(10, self._prot_box_y, self.PM_W - 20, 70), 6, 6)
-        self._draw_chk(p, 20, self._prot_chk1_y, self._chk_hide_uninstall, "Hide uninstall button")
-        self._draw_chk(p, 20, self._prot_chk2_y, self._chk_hide_disable, "Hide disable button")
-        if self._privapp_checks:
-            p.setPen(QColor(160, 160, 160))
-            p.setFont(self._font(11))
-            p.drawText(QRectF(14, self._priv_label_y, self.PM_W - 28, 20),
-                       Qt.AlignLeft | Qt.AlignVCenter,
-                       f"Privileged Permissions ({len(self._privapp_checks)})")
-            p.setPen(BORDER_COLOR)
-            p.drawRoundedRect(QRectF(10, self._priv_box_y, self.PM_W - 20, self._priv_box_h), 6, 6)
-            p.setClipRect(QRectF(14, self._priv_box_y + 4, self.PM_W - 28, self._priv_box_h - 8))
-            row_h = 28
-            for i, item in enumerate(self._privapp_checks):
-                cy = self._priv_content_y + i * row_h
+        self._draw_chk(p, 20, self._prot_chk1_y, self._chk_hide_disable, "Hide Disable")
+        self._draw_chk(p, 20, self._prot_chk2_y, self._chk_hide_uninstall, "Hide Uninstall")
+        total = len(self._perm_checks)
+        p.setPen(QColor(160, 160, 160))
+        p.setFont(self._font(11))
+        p.drawText(QRectF(14, self._perm_label_y, self.PM_W - 28, 20),
+                   Qt.AlignLeft | Qt.AlignVCenter,
+                   f"Permissions ({total})")
+        p.setPen(BORDER_COLOR)
+        p.drawRoundedRect(QRectF(10, self._perm_box_y, self.PM_W - 20, self._perm_box_h), 6, 6)
+        p.setClipRect(QRectF(14, self._perm_box_y + 4, self.PM_W - 28, self._perm_box_h - 8))
+        row_h = self.ROW_H
+        for i, item in enumerate(self._perm_checks):
+            cy = self._perm_content_y + i * row_h
+            if item["greyed"]:
+                p.setPen(QColor(100, 100, 100))
+                p.setFont(self._font(11))
+                p.drawText(QRectF(44, cy, self.PM_W - 120, 16),
+                           Qt.AlignLeft | Qt.AlignVCenter, item["perm"])
+                p.setPen(QColor(80, 80, 80))
+                p.setFont(self._font(9))
+                p.drawText(QRectF(self.PM_W - 70, cy + 2, 50, 16),
+                           Qt.AlignRight | Qt.AlignVCenter, "auto")
+            else:
                 self._draw_square_chk(p, 20, cy, item["checked"], item["perm"])
-            p.setClipping(False)
-        if self._runtime_checks:
-            p.setPen(QColor(160, 160, 160))
-            p.setFont(self._font(11))
-            p.drawText(QRectF(14, self._run_label_y, self.PM_W - 28, 20),
-                       Qt.AlignLeft | Qt.AlignVCenter,
-                       f"Runtime Permissions ({len(self._runtime_checks)})")
-            p.setPen(BORDER_COLOR)
-            p.drawRoundedRect(QRectF(10, self._run_box_y, self.PM_W - 20, self._run_box_h), 6, 6)
-            p.setClipRect(QRectF(14, self._run_box_y + 4, self.PM_W - 28, self._run_box_h - 8))
-            row_h = 28
-            for i, item in enumerate(self._runtime_checks):
-                cy = self._run_content_y + i * row_h
-                self._draw_square_chk(p, 20, cy, item["checked"], item["perm"])
-            p.setClipping(False)
-        if self._normal_perms:
-            p.setPen(QColor(160, 160, 160))
-            p.setFont(self._font(11))
-            p.drawText(QRectF(14, self._normal_label_y, self.PM_W - 28, 20),
-                       Qt.AlignLeft | Qt.AlignVCenter,
-                       f"Normal Permissions ({len(self._normal_perms)}) - always granted")
-            p.setPen(QColor(120, 120, 120))
-            p.setFont(self._font(9))
-            txt = "  |  ".join(self._normal_perms[:4])
-            if len(self._normal_perms) > 4:
-                txt += "  |  ..."
-            p.drawText(QRectF(20, self._normal_text_y, self.PM_W - 40, 16),
-                       Qt.AlignLeft | Qt.AlignVCenter, txt)
-        self._draw_btn(p, self._btn_ok_rect, "OK", True)
+                if item["checked"]:
+                    lock_x = self.PM_W - 60
+                    lock_y = cy
+                    self._draw_lock(p, lock_x, lock_y, item["locked"])
+        p.setClipping(False)
+        self._draw_btn(p, self._btn_ok_rect, "Install", True)
         self._draw_btn(p, self._btn_cancel_rect, "Cancel", False)
         border_pen = QPen(BORDER_COLOR, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
         p.setPen(border_pen)
@@ -1598,8 +1595,21 @@ class PermissionManagerWindow(QWidget):
             p.drawText(QRectF(x, y, sz, sz), Qt.AlignCenter, "\u2713")
         p.setPen(TEXT_COLOR)
         p.setFont(self._font(11))
-        p.drawText(QRectF(x + sz + 6, y, self.PM_W - x - sz - 30, sz),
+        p.drawText(QRectF(x + sz + 6, y, self.PM_W - x - sz - 80, sz),
                    Qt.AlignLeft | Qt.AlignVCenter, text)
+        p.restore()
+
+    def _draw_lock(self, p, x, y, locked):
+        p.save()
+        sz = self.LOCK_W
+        if locked:
+            p.setPen(QColor(255, 180, 0))
+            p.setFont(self._font(14))
+            p.drawText(QRectF(x, y, sz, sz), Qt.AlignCenter, "\U0001f512")
+        else:
+            p.setPen(QColor(120, 120, 120))
+            p.setFont(self._font(14))
+            p.drawText(QRectF(x, y, sz, sz), Qt.AlignCenter, "\U0001f513")
         p.restore()
 
     def _draw_chk(self, p, x, y, checked, text):
@@ -1654,22 +1664,21 @@ class PermissionManagerWindow(QWidget):
         bx, by, bw, bh = self._btn_cancel_rect
         if bx <= ref.x() <= bx + bw and by <= ref.y() <= by + bh:
             return "cancel"
-        for i in range(len(self._privapp_checks)):
-            px = 20
-            py = self._priv_content_y + i * 28
-            if px <= ref.x() <= px + 500 and py <= ref.y() <= py + 20:
-                return f"priv_{i}"
-        for i in range(len(self._runtime_checks)):
-            rx = 20
-            ry = self._run_content_y + i * 28
-            if rx <= ref.x() <= rx + 500 and ry <= ref.y() <= ry + 20:
-                return f"run_{i}"
         bx, by = 20, self._prot_chk1_y
         if bx <= ref.x() <= bx + 500 and by <= ref.y() <= by + 20:
-            return "prot_uninstall"
+            return "prot_disable"
         by2 = self._prot_chk2_y
         if bx <= ref.x() <= bx + 500 and by2 <= ref.y() <= by2 + 20:
-            return "prot_disable"
+            return "prot_uninstall"
+        for i in range(len(self._perm_checks)):
+            px = 20
+            py = self._perm_content_y + i * self.ROW_H
+            lock_x = self.PM_W - 60
+            if lock_x <= ref.x() <= lock_x + self.LOCK_W and py <= ref.y() <= py + self.ROW_H:
+                if not self._perm_checks[i]["greyed"] and self._perm_checks[i]["checked"]:
+                    return f"lock_{i}"
+            if px <= ref.x() <= px + 500 and py <= ref.y() <= py + 20:
+                return f"perm_{i}"
         return None
 
     def mousePressEvent(self, event):
@@ -1686,13 +1695,16 @@ class PermissionManagerWindow(QWidget):
             self._on_ok()
         elif hit == "cancel":
             self._on_cancel()
-        elif hit and hit.startswith("priv_"):
+        elif hit and hit.startswith("perm_"):
             idx = int(hit.split("_")[1])
-            self._privapp_checks[idx]["checked"] = not self._privapp_checks[idx]["checked"]
-            self.update()
-        elif hit and hit.startswith("run_"):
+            item = self._perm_checks[idx]
+            if not item["greyed"]:
+                item["checked"] = not item["checked"]
+                self.update()
+        elif hit and hit.startswith("lock_"):
             idx = int(hit.split("_")[1])
-            self._runtime_checks[idx]["checked"] = not self._runtime_checks[idx]["checked"]
+            item = self._perm_checks[idx]
+            item["locked"] = not item["locked"]
             self.update()
         elif hit and hit.startswith("prot_"):
             tag = hit.split("_")[1]
@@ -2183,7 +2195,7 @@ class WSATWRP:
         time.sleep(1)
         window.request_close()
 
-    def install_as_system_app(self, apk_paths, target_initrd=None):
+    def install_as_system_app(self, apk_paths, target_initrd=None, force_update=False):
         app = QApplication.instance()
         if app is None:
             app = QApplication(sys.argv)
@@ -2253,6 +2265,7 @@ class WSATWRP:
                     "hide_disable": True,
                     "privapp_perms": list(info["privileged"]),
                     "runtime_perms": list(info["dangerous"]),
+                    "fixed_runtime_perms": list(info["dangerous"]),
                 }
             permission_profiles[info["package"]] = profile
 
@@ -2260,10 +2273,11 @@ class WSATWRP:
             apk_paths=apk_paths,
             target_initrd=target_initrd,
             permission_profiles=permission_profiles,
+            force_update=force_update,
         ))
 
     def _flow_install_system_app(self, log, window, apk_paths, target_initrd=None,
-                                  permission_profiles=None):
+                                  permission_profiles=None, force_update=False):
         _debug("_flow_install_system_app() started")
         _debug(f"  apk_paths: {apk_paths}")
 
@@ -2325,6 +2339,10 @@ class WSATWRP:
                 f"runtime={len(profile.get('runtime_perms', []))}")
         time.sleep(0.5)
 
+        has_root = WSADetector.check_root()
+        log(f"Root access: {'detected' if has_root else 'not detected'}")
+        time.sleep(0.5)
+
         if is_wsa_img:
             log("Stopping WSA...")
             KillWSA.kill_all()
@@ -2349,6 +2367,11 @@ class WSATWRP:
             log(f"Installing {pkg} as system app")
             time.sleep(0.5)
 
+            if force_update and initrd.has_lsp_image():
+                log("Force update: removing old image")
+                arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
+                CpioUtils.delete_file(initrd.path, arcname)
+
             if initrd.has_lsp_image():
                 _debug("lsp image exists, checking for duplicate")
                 existing = initrd.find_existing_apks()
@@ -2356,11 +2379,9 @@ class WSATWRP:
                 found = False
                 for existing_pkg, existing_apk in existing:
                     if os.path.basename(existing_apk) == apk_basename:
-                        log(f"{pkg} already installed, skip")
+                        log(f"{pkg} already installed, updating")
                         found = True
                         break
-                if found:
-                    continue
 
                 _debug("Extracting existing image")
                 extract_dir = initrd.extract_lsp_image()
@@ -2377,17 +2398,18 @@ class WSATWRP:
 
                     privapp_perms = profile.get("privapp_perms", [])
                     runtime_perms = profile.get("runtime_perms", [])
+                    fixed_perms = set(profile.get("fixed_runtime_perms", []))
                     if privapp_perms:
                         etc_perms = os.path.join(extract_dir, "system", "etc", "permissions")
                         os.makedirs(etc_perms, exist_ok=True)
-                        xml = InitrdManager.generate_privapp_xml("wsa-installer", privapp_perms)
-                        with open(os.path.join(etc_perms, "privapp-permissions-wsa-installer.xml"), "w") as f:
+                        xml = InitrdManager.generate_privapp_xml(pkg, privapp_perms)
+                        with open(os.path.join(etc_perms, "privapp-permissions-wsa-installer.xml"), "w", newline="") as f:
                             f.write(xml)
                     if runtime_perms:
                         etc_def = os.path.join(extract_dir, "system", "etc", "default-permissions")
                         os.makedirs(etc_def, exist_ok=True)
-                        xml = InitrdManager.generate_default_xml("wsa-installer", runtime_perms)
-                        with open(os.path.join(etc_def, "default-permissions-wsa-installer.xml"), "w") as f:
+                        xml = InitrdManager.generate_default_xml(pkg, runtime_perms, fixed_perms)
+                        with open(os.path.join(etc_def, "default-permissions-wsa-installer.xml"), "w", newline="") as f:
                             f.write(xml)
 
                     initrd.repack_lsp_image()
@@ -2586,6 +2608,8 @@ Examples:
                         help="Extract 7z + patch.json: --inject SEVENZ [into DEST]")
     parser.add_argument("--install-as-system-app", nargs='+', default=None,
                         help="Install APK(s) as system app: --install-as-system-app APK1 [APK2 ...]")
+    parser.add_argument("--update-as-system-app", nargs='+', default=None,
+                        help="Update/reinstall APK(s) as system app (overrides existing)")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug output")
     args = parser.parse_args()
@@ -2623,6 +2647,16 @@ Examples:
         twrp.install_as_system_app(
             apk_paths=args.install_as_system_app,
             target_initrd=args.path,
+        )
+        return
+
+    if args.update_as_system_app is not None:
+        _debug("Command: --update-as-system-app")
+        twrp = WSATWRP()
+        twrp.install_as_system_app(
+            apk_paths=args.update_as_system_app,
+            target_initrd=args.path,
+            force_update=True,
         )
         return
 
