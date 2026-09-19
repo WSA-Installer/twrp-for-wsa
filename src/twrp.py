@@ -21,7 +21,7 @@ import threading
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal, QObject
+from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal, QObject, QEventLoop
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QWidget,
@@ -1215,7 +1215,6 @@ class RecoverySignals(QObject):
     log_updated = Signal(str)
     close_requested = Signal()
     progress_updated = Signal(float)
-    perm_manager_show = Signal(object)
 
 
 class RecoveryWindow(QWidget):
@@ -1237,7 +1236,6 @@ class RecoveryWindow(QWidget):
         self._signals.log_updated.connect(self._on_log_update)
         self._signals.close_requested.connect(self.close)
         self._signals.progress_updated.connect(self._on_progress_update)
-        self._signals.perm_manager_show.connect(self._on_perm_manager_show)
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._animate_progress)
         self._anim_timer.start(50)
@@ -1249,14 +1247,6 @@ class RecoveryWindow(QWidget):
     def _on_progress_update(self, value):
         self._progress_value = value
         self.update()
-
-    def _on_perm_manager_show(self, widget):
-        widget.setParent(self)
-        widget.move(
-            self.x() + (self.width() - widget.width()) // 2,
-            self.y() + (self.height() - widget.height()) // 2,
-        )
-        widget.show()
 
     def _animate_progress(self):
         self._progress_value += 0.02
@@ -1386,30 +1376,24 @@ class RecoveryWindow(QWidget):
 
 class PermissionManagerSignals(QObject):
     result_ready = Signal(dict)
-    closed = Signal()
 
 
 class PermissionManagerWindow(QWidget):
 
-    PM_REF_W = 2000
-    PM_REF_H = 2500
     PM_W = 640
-    PM_H = 800
-    PM_HDR_H = 100
-    PM_RADIUS = 30
+    PM_HDR_H = 44
+    PM_RADIUS = 16
 
     def __init__(self, package_name, app_label, permissions_by_category, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setFixedSize(self.PM_W, self.PM_H)
         self.setMouseTracking(True)
         self._package_name = package_name
         self._app_label = app_label
         self._signals = PermissionManagerSignals()
         self._drag_offset = None
         self._hover_btn = None
-        self._press_btn = None
         self._chk_hide_uninstall = True
         self._chk_hide_disable = True
         self._privapp_checks = []
@@ -1419,34 +1403,74 @@ class PermissionManagerWindow(QWidget):
         for perm in permissions_by_category.get("dangerous", []):
             self._runtime_checks.append({"perm": perm, "checked": True})
         self._normal_perms = permissions_by_category.get("normal", [])
+        self._calc_height()
+        self.setFixedSize(self.PM_W, self._pm_h)
         self._build_layout()
 
+    def _calc_height(self):
+        row_h = 28
+        chk_h = 30
+        y = self.PM_HDR_H + 8
+        y += 32
+        y += chk_h + 8
+        y += 28
+        grp_h = len(self._privapp_checks) * row_h + 16
+        y += 4 + grp_h + 12
+        y += 28
+        grp_h2 = max(len(self._runtime_checks), 1) * row_h + 16
+        y += 4 + grp_h2 + 12
+        if self._normal_perms:
+            y += 28 + 20
+        y += 50
+        self._pm_h = max(y + 30, 300)
+
     def _build_layout(self):
-        self._close_rect = (588, 8, 28, 28)
+        cx = self.PM_W - 10 - 24
+        self._close_rect = (cx, 10, 24, 24)
         self._priv_chk_rects = []
         self._run_chk_rects = []
-        self._chk_protection = [(80, 152, "uninstall"), (80, 185, "disable")]
-        y = 230
-        row_h = 26
-        for i in range(len(self._privapp_checks)):
-            self._priv_chk_rects.append((80, y + i * row_h))
-        self._priv_group_y = 210
-        self._priv_content_y = y
-        y2 = y + max(len(self._privapp_checks), 1) * row_h + 20
-        self._run_group_y = y2 - 20
-        self._run_content_y = y2
-        for i in range(len(self._runtime_checks)):
-            self._run_chk_rects.append((80, y2 + i * row_h))
-        self._normal_y = y2 + max(len(self._runtime_checks), 1) * row_h + 20
-        self._btn_ok_rect = (180, 730, 130, 40)
-        self._btn_cancel_rect = (340, 730, 130, 40)
+        row_h = 28
+        chk_h = 30
+        y = self.PM_HDR_H + 8
+        self._app_label_y = y
+        y += 32
+        self._prot_label_y = y
+        y += 22
+        self._prot_box_y = y
+        self._prot_chk1_y = y + 9
+        self._prot_chk2_y = y + 9 + chk_h
+        y += chk_h * 2 + 18
+        self._priv_label_y = y
+        y += 24
+        self._priv_box_y = y
+        self._priv_content_y = y + 8
+        priv_count = len(self._privapp_checks)
+        priv_box_h = max(priv_count, 1) * row_h + 16
+        self._priv_box_h = priv_box_h
+        y += priv_box_h + 12
+        self._run_label_y = y
+        y += 24
+        self._run_box_y = y
+        self._run_content_y = y + 8
+        run_count = max(len(self._runtime_checks), 1)
+        run_box_h = run_count * row_h + 16
+        self._run_box_h = run_box_h
+        y += run_box_h + 12
+        if self._normal_perms:
+            self._normal_label_y = y
+            y += 24
+            self._normal_text_y = y
+            y += 20
+        btn_y = self._pm_h - 50
+        self._btn_ok_rect = (self.PM_W // 2 - 130, btn_y, 120, 36)
+        self._btn_cancel_rect = (self.PM_W // 2 + 10, btn_y, 120, 36)
 
     def _on_ok(self):
         self._signals.result_ready.emit(self.get_result())
         self.close()
 
     def _on_cancel(self):
-        self._signals.closed.emit()
+        self._signals.result_ready.emit(None)
         self.close()
 
     def get_result(self):
@@ -1467,13 +1491,13 @@ class PermissionManagerWindow(QWidget):
 
     def _window_path(self):
         path = QPainterPath()
-        path.addRoundedRect(QRectF(1.5, 1.5, self.PM_REF_W - 3, self.PM_REF_H - 3),
+        path.addRoundedRect(QRectF(1.5, 1.5, self.PM_W - 3, self._pm_h - 3),
                             self.PM_RADIUS, self.PM_RADIUS)
         return path
 
     def _header_path(self):
         r = self.PM_RADIUS
-        right = self.PM_REF_W - 1.5
+        right = self.PM_W - 1.5
         bottom = self.PM_HDR_H
         left = 1.5
         top = 1.5
@@ -1490,77 +1514,76 @@ class PermissionManagerWindow(QWidget):
 
     def paintEvent(self, _event):
         p = QPainter(self)
-        sx = self.width() / self.PM_REF_W
-        sy = self.height() / self.PM_REF_H
-        p.scale(sx, sy)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setRenderHint(QPainter.TextAntialiasing, True)
         outer = self._window_path()
         p.fillPath(outer, MAIN_COLOR)
         p.fillPath(self._header_path(), HEADER_COLOR)
         p.setPen(TITLE_COLOR)
-        p.setFont(self._font(38))
-        p.drawText(QRectF(80, 25, 1600, 55), Qt.AlignLeft | Qt.AlignVCenter, "Permission Manager")
-        pen = QPen(QColor(232, 232, 232), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        p.setFont(self._font(14))
+        p.drawText(QRectF(14, 8, 200, 28), Qt.AlignLeft | Qt.AlignVCenter, "Permission Manager")
+        pen = QPen(QColor(232, 232, 232), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
         p.setPen(pen)
-        p.drawLine(1934, 31, 1966, 63)
-        p.drawLine(1966, 31, 1934, 63)
+        cx = self.PM_W - 22
+        p.drawLine(cx, 14, cx + 10, 24)
+        p.drawLine(cx + 10, 14, cx, 24)
         p.setPen(TEXT_COLOR)
-        p.setFont(self._font(36, QFont.Bold))
-        p.drawText(QRectF(80, 120, 1840, 50), Qt.AlignLeft | Qt.AlignVCenter,
+        p.setFont(self._font(13, QFont.Bold))
+        p.drawText(QRectF(14, self._app_label_y, self.PM_W - 28, 28),
+                   Qt.AlignLeft | Qt.AlignVCenter,
                    f"{self._app_label} ({self._package_name})")
         p.setPen(QColor(160, 160, 160))
-        p.setFont(self._font(30))
-        p.drawText(QRectF(80, 210, 1840, 40), Qt.AlignLeft | Qt.AlignVCenter, "App Protection")
+        p.setFont(self._font(11))
+        p.drawText(QRectF(14, self._prot_label_y, self.PM_W - 28, 20),
+                   Qt.AlignLeft | Qt.AlignVCenter, "App Protection")
         p.setPen(BORDER_COLOR)
-        p.drawRoundedRect(QRectF(60, 240, 1880, 100), 12, 12)
-        self._draw_chk(p, 80, 152, self._chk_hide_uninstall, "Hide uninstall button")
-        self._draw_chk(p, 80, 185, self._chk_hide_disable, "Hide disable button")
-        row_h = 26
+        p.drawRoundedRect(QRectF(10, self._prot_box_y, self.PM_W - 20, 70), 6, 6)
+        self._draw_chk(p, 20, self._prot_chk1_y, self._chk_hide_uninstall, "Hide uninstall button")
+        self._draw_chk(p, 20, self._prot_chk2_y, self._chk_hide_disable, "Hide disable button")
         if self._privapp_checks:
             p.setPen(QColor(160, 160, 160))
-            p.setFont(self._font(30))
-            p.drawText(QRectF(80, self._priv_group_y, 1840, 40), Qt.AlignLeft | Qt.AlignVCenter,
+            p.setFont(self._font(11))
+            p.drawText(QRectF(14, self._priv_label_y, self.PM_W - 28, 20),
+                       Qt.AlignLeft | Qt.AlignVCenter,
                        f"Privileged Permissions ({len(self._privapp_checks)})")
-            grp_h = min(len(self._privapp_checks) * row_h + 16, 260)
             p.setPen(BORDER_COLOR)
-            p.drawRoundedRect(QRectF(60, self._priv_group_y + 35, 1880, grp_h), 12, 12)
-            p.setClipRect(QRectF(70, self._priv_group_y + 40, 1860, grp_h - 10))
-            p.setPen(TEXT_COLOR)
-            p.setFont(self._font(26))
+            p.drawRoundedRect(QRectF(10, self._priv_box_y, self.PM_W - 20, self._priv_box_h), 6, 6)
+            p.setClipRect(QRectF(14, self._priv_box_y + 4, self.PM_W - 28, self._priv_box_h - 8))
+            row_h = 28
             for i, item in enumerate(self._privapp_checks):
                 cy = self._priv_content_y + i * row_h
-                self._draw_square_chk(p, 80, cy, item["checked"], item["perm"])
+                self._draw_square_chk(p, 20, cy, item["checked"], item["perm"])
             p.setClipping(False)
         if self._runtime_checks:
             p.setPen(QColor(160, 160, 160))
-            p.setFont(self._font(30))
-            p.drawText(QRectF(80, self._run_group_y, 1840, 40), Qt.AlignLeft | Qt.AlignVCenter,
+            p.setFont(self._font(11))
+            p.drawText(QRectF(14, self._run_label_y, self.PM_W - 28, 20),
+                       Qt.AlignLeft | Qt.AlignVCenter,
                        f"Runtime Permissions ({len(self._runtime_checks)})")
-            grp_h = min(len(self._runtime_checks) * row_h + 16, 260)
             p.setPen(BORDER_COLOR)
-            p.drawRoundedRect(QRectF(60, self._run_group_y + 35, 1880, grp_h), 12, 12)
-            p.setClipRect(QRectF(70, self._run_group_y + 40, 1860, grp_h - 10))
-            p.setPen(TEXT_COLOR)
-            p.setFont(self._font(26))
+            p.drawRoundedRect(QRectF(10, self._run_box_y, self.PM_W - 20, self._run_box_h), 6, 6)
+            p.setClipRect(QRectF(14, self._run_box_y + 4, self.PM_W - 28, self._run_box_h - 8))
+            row_h = 28
             for i, item in enumerate(self._runtime_checks):
                 cy = self._run_content_y + i * row_h
-                self._draw_square_chk(p, 80, cy, item["checked"], item["perm"])
+                self._draw_square_chk(p, 20, cy, item["checked"], item["perm"])
             p.setClipping(False)
         if self._normal_perms:
             p.setPen(QColor(160, 160, 160))
-            p.setFont(self._font(30))
-            p.drawText(QRectF(80, self._normal_y, 1840, 40), Qt.AlignLeft | Qt.AlignVCenter,
-                       f"Normal Permissions ({len(self._normal_perms)}) \u2014 always granted")
+            p.setFont(self._font(11))
+            p.drawText(QRectF(14, self._normal_label_y, self.PM_W - 28, 20),
+                       Qt.AlignLeft | Qt.AlignVCenter,
+                       f"Normal Permissions ({len(self._normal_perms)}) - always granted")
             p.setPen(QColor(120, 120, 120))
-            p.setFont(self._font(24))
-            txt = "  \u00b7  ".join(self._normal_perms[:6])
-            if len(self._normal_perms) > 6:
-                txt += "  \u00b7  ..."
-            p.drawText(QRectF(100, self._normal_y + 45, 1800, 35), Qt.AlignLeft | Qt.AlignVCenter, txt)
+            p.setFont(self._font(9))
+            txt = "  |  ".join(self._normal_perms[:4])
+            if len(self._normal_perms) > 4:
+                txt += "  |  ..."
+            p.drawText(QRectF(20, self._normal_text_y, self.PM_W - 40, 16),
+                       Qt.AlignLeft | Qt.AlignVCenter, txt)
         self._draw_btn(p, self._btn_ok_rect, "OK", True)
         self._draw_btn(p, self._btn_cancel_rect, "Cancel", False)
-        border_pen = QPen(BORDER_COLOR, 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        border_pen = QPen(BORDER_COLOR, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
         p.setPen(border_pen)
         p.setBrush(Qt.NoBrush)
         p.drawPath(outer)
@@ -1568,38 +1591,42 @@ class PermissionManagerWindow(QWidget):
 
     def _draw_square_chk(self, p, x, y, checked, text):
         p.save()
+        sz = 16
         if checked:
             p.setBrush(PROGRESS_FILL)
             p.setPen(PROGRESS_FILL)
         else:
             p.setBrush(Qt.NoBrush)
             p.setPen(QColor(120, 120, 120))
-        p.drawRoundedRect(QRectF(x, y, 22, 22), 4, 4)
+        p.drawRoundedRect(QRectF(x, y, sz, sz), 3, 3)
         if checked:
             p.setPen(QColor(255, 255, 255))
-            p.setFont(self._font(16, QFont.Bold))
-            p.drawText(QRectF(x, y, 22, 22), Qt.AlignCenter, "\u2713")
+            p.setFont(self._font(10, QFont.Bold))
+            p.drawText(QRectF(x, y, sz, sz), Qt.AlignCenter, "\u2713")
         p.setPen(TEXT_COLOR)
-        p.setFont(self._font(26))
-        p.drawText(QRectF(x + 32, y, 1780, 22), Qt.AlignLeft | Qt.AlignVCenter, text)
+        p.setFont(self._font(11))
+        p.drawText(QRectF(x + sz + 6, y, self.PM_W - x - sz - 30, sz),
+                   Qt.AlignLeft | Qt.AlignVCenter, text)
         p.restore()
 
     def _draw_chk(self, p, x, y, checked, text):
         p.save()
+        sz = 18
         if checked:
             p.setBrush(PROGRESS_FILL)
             p.setPen(PROGRESS_FILL)
         else:
             p.setBrush(Qt.NoBrush)
             p.setPen(QColor(120, 120, 120))
-        p.drawRoundedRect(QRectF(x, y, 28, 28), 5, 5)
+        p.drawRoundedRect(QRectF(x, y, sz, sz), 3, 3)
         if checked:
             p.setPen(QColor(255, 255, 255))
-            p.setFont(self._font(18, QFont.Bold))
-            p.drawText(QRectF(x, y, 28, 28), Qt.AlignCenter, "\u2713")
+            p.setFont(self._font(11, QFont.Bold))
+            p.drawText(QRectF(x, y, sz, sz), Qt.AlignCenter, "\u2713")
         p.setPen(TEXT_COLOR)
-        p.setFont(self._font(30))
-        p.drawText(QRectF(x + 40, y, 800, 28), Qt.AlignLeft | Qt.AlignVCenter, text)
+        p.setFont(self._font(11))
+        p.drawText(QRectF(x + sz + 6, y, 500, sz),
+                   Qt.AlignLeft | Qt.AlignVCenter, text)
         p.restore()
 
     def _draw_btn(self, p, rect, text, is_ok):
@@ -1618,9 +1645,9 @@ class PermissionManagerWindow(QWidget):
             else:
                 p.setBrush(Qt.NoBrush)
             p.setPen(BORDER_COLOR)
-        p.drawRoundedRect(QRectF(x, y, w, h), 10, 10)
+        p.drawRoundedRect(QRectF(x, y, w, h), 8, 8)
         p.setPen(QColor(255, 255, 255) if is_ok else TEXT_COLOR)
-        p.setFont(self._font(30, QFont.Bold))
+        p.setFont(self._font(12, QFont.Bold))
         p.drawText(QRectF(x, y, w, h), Qt.AlignCenter, text)
         p.restore()
 
@@ -1634,22 +1661,29 @@ class PermissionManagerWindow(QWidget):
         bx, by, bw, bh = self._btn_cancel_rect
         if bx <= ref.x() <= bx + bw and by <= ref.y() <= by + bh:
             return "cancel"
-        for i, (cx, cy) in enumerate(self._priv_chk_rects):
-            if cx <= ref.x() <= cx + 200 and cy <= ref.y() <= cy + 26:
+        for i in range(len(self._privapp_checks)):
+            px = 20
+            py = self._priv_content_y + i * 28
+            if px <= ref.x() <= px + 500 and py <= ref.y() <= py + 20:
                 return f"priv_{i}"
-        for i, (cx, cy) in enumerate(self._run_chk_rects):
-            if cx <= ref.x() <= cx + 200 and cy <= ref.y() <= cy + 26:
+        for i in range(len(self._runtime_checks)):
+            rx = 20
+            ry = self._run_content_y + i * 28
+            if rx <= ref.x() <= rx + 500 and ry <= ref.y() <= ry + 20:
                 return f"run_{i}"
-        for cx, cy, tag in self._chk_protection:
-            if cx <= ref.x() <= cx + 400 and cy <= ref.y() <= cy + 28:
-                return f"prot_{tag}"
+        bx, by = 20, self._prot_chk1_y
+        if bx <= ref.x() <= bx + 500 and by <= ref.y() <= by + 20:
+            return "prot_uninstall"
+        by2 = self._prot_chk2_y
+        if bx <= ref.x() <= bx + 500 and by2 <= ref.y() <= by2 + 20:
+            return "prot_disable"
         return None
 
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
-        sx = self.PM_REF_W / self.PM_W
-        sy = self.PM_REF_H / self.PM_H
+        sx = self.PM_W / self.width()
+        sy = self._pm_h / self.height()
         pos = event.position()
         ref = QPoint(round(pos.x() * sx), round(pos.y() * sy))
         hit = self._hit_test(ref)
@@ -1678,8 +1712,8 @@ class PermissionManagerWindow(QWidget):
             self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, event):
-        sx = self.PM_REF_W / self.PM_W
-        sy = self.PM_REF_H / self.PM_H
+        sx = self.PM_W / self.width()
+        sy = self._pm_h / self.height()
         pos = event.position()
         ref = QPoint(round(pos.x() * sx), round(pos.y() * sy))
         hit = self._hit_test(ref)
@@ -2157,12 +2191,86 @@ class WSATWRP:
         window.request_close()
 
     def install_as_system_app(self, apk_paths, target_initrd=None):
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication(sys.argv)
+        app.setApplicationName(APP_NAME)
+        app.setStyle("Fusion")
+
+        for apk_path in apk_paths:
+            if not os.path.exists(apk_path):
+                print(f"  File not found: {apk_path}", flush=True)
+                return 1
+
+        is_wsa_img = False
+        if target_initrd:
+            initrd_path = target_initrd
+            if not os.path.exists(initrd_path):
+                print(f"  File not found: {initrd_path}", flush=True)
+                return 1
+            wsa_path = WSADetector.find_path()
+            if wsa_path:
+                wsa_initrd = WSADetector.initrd_path(wsa_path)
+                if os.path.normpath(initrd_path) == os.path.normpath(wsa_initrd):
+                    is_wsa_img = True
+        else:
+            self.wsa_path = WSADetector.find_path()
+            if not self.wsa_path:
+                print("  WSA not found!", flush=True)
+                return 1
+            initrd_path = WSADetector.initrd_path(self.wsa_path)
+            if not os.path.exists(initrd_path):
+                print("  Recovery system not found!", flush=True)
+                return 1
+            is_wsa_img = True
+
+        apk_infos = []
+        for apk_path in apk_paths:
+            info = ApkAnalyzer.get_all_info(apk_path)
+            apk_infos.append(info)
+
+        permission_profiles = {}
+        for info in apk_infos:
+            categories = {
+                "privileged": info["privileged"],
+                "dangerous": info["dangerous"],
+                "normal": info["normal"],
+            }
+            result_box = [None]
+            loop = QEventLoop()
+            dlg = PermissionManagerWindow(
+                package_name=info["package"],
+                app_label=info["label"],
+                permissions_by_category=categories,
+            )
+            dlg._signals.result_ready.connect(lambda r, rb=result_box, l=loop: (rb.__setitem__(0, r), l.quit()))
+            screen = app.primaryScreen()
+            if screen is not None:
+                available = screen.availableGeometry()
+                dlg.move(
+                    available.center().x() - dlg.width() // 2,
+                    available.center().y() - dlg.height() // 2,
+                )
+            dlg.show()
+            loop.exec()
+            profile = result_box[0]
+            if profile is None:
+                profile = {
+                    "hide_uninstall": True,
+                    "hide_disable": True,
+                    "privapp_perms": list(info["privileged"]),
+                    "runtime_perms": list(info["dangerous"]),
+                }
+            permission_profiles[info["package"]] = profile
+
         return self._launch_gui(self._flow_install_system_app, dict(
             apk_paths=apk_paths,
             target_initrd=target_initrd,
+            permission_profiles=permission_profiles,
         ))
 
-    def _flow_install_system_app(self, log, window, apk_paths, target_initrd=None):
+    def _flow_install_system_app(self, log, window, apk_paths, target_initrd=None,
+                                  permission_profiles=None):
         _debug("_flow_install_system_app() started")
         _debug(f"  apk_paths: {apk_paths}")
 
@@ -2215,56 +2323,13 @@ class WSATWRP:
 
         initrd = InitrdManager(initrd_path)
 
-        log("Reading APK permissions...")
-        apk_infos = []
-        for apk_path in apk_paths:
-            info = ApkAnalyzer.get_all_info(apk_path)
-            apk_infos.append(info)
-            log(f"  {info['label']} ({info['package']})")
-            log(f"    Privileged: {len(info['privileged'])}, "
-                f"Runtime: {len(info['dangerous'])}, "
-                f"Normal: {len(info['normal'])}")
-            time.sleep(0.3)
-        time.sleep(0.5)
+        if permission_profiles is None:
+            permission_profiles = {}
 
-        permission_profiles = {}
-        for info in apk_infos:
-            log(f"Permission manager: {info['label']}")
-            categories = {
-                "privileged": info["privileged"],
-                "dangerous": info["dangerous"],
-                "normal": info["normal"],
-            }
-            perm_result = [None]
-            perm_event = threading.Event()
-
-            def _on_perm_result(result, _r=perm_result, _e=perm_event):
-                _r[0] = result
-                _e.set()
-
-            def _on_perm_closed(_e=perm_event):
-                _e.set()
-
-            dlg = PermissionManagerWindow(
-                package_name=info["package"],
-                app_label=info["label"],
-                permissions_by_category=categories,
-            )
-            dlg._signals.result_ready.connect(_on_perm_result)
-            dlg._signals.closed.connect(_on_perm_closed)
-            window._signals.perm_manager_show.emit(dlg)
-            perm_event.wait()
-
-            if perm_result[0] is None:
-                log(f"Skipped {info['package']}")
-                continue
-            profile = perm_result[0]
-            permission_profiles[info["package"]] = profile
-            log(f"  Uninstall: {'hidden' if profile['hide_uninstall'] else 'visible'}")
-            log(f"  Disable: {'hidden' if profile['hide_disable'] else 'visible'}")
-            log(f"  Privapp: {len(profile['privapp_perms'])} permissions")
-            log(f"  Runtime: {len(profile['runtime_perms'])} permissions")
-            time.sleep(0.3)
+        log("Installing system apps...")
+        for pkg, profile in permission_profiles.items():
+            log(f"  {pkg}: privapp={len(profile.get('privapp_perms', []))}, "
+                f"runtime={len(profile.get('runtime_perms', []))}")
         time.sleep(0.5)
 
         if is_wsa_img:
