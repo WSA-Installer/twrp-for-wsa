@@ -871,7 +871,7 @@ class InitrdManager:
                 "author=Mr CYBER\n"
                 "description=System app installer for WSA\n"
             )
-            with open(os.path.join(LSP_TEMP, "module.prop"), "w") as f:
+            with open(os.path.join(LSP_TEMP, "module.prop"), "w", newline="") as f:
                 f.write(module_prop)
             post_fs_data = (
                 "#!/bin/sh\n"
@@ -894,7 +894,7 @@ class InitrdManager:
                 'cp -dr --preserve=all "$BASE/module.prop" "$MOD_UPDATE_PATH"\n'
                 'cp -dr --preserve=all "$BASE/system" "$MOD_UPDATE_PATH"\n'
             )
-            with open(os.path.join(LSP_TEMP, "post-fs-data.sh"), "w") as f:
+            with open(os.path.join(LSP_TEMP, "post-fs-data.sh"), "w", newline="") as f:
                 f.write(post_fs_data)
 
             all_privapp = []
@@ -936,7 +936,7 @@ class InitrdManager:
                     f.write(xml)
                 _debug(f"  Generated default-permissions-wsa-installer.xml ({len(all_runtime)} perms)")
 
-            image_path = os.path.join(LSP_TEMP, LSP_IMAGE_NAME)
+            image_path = os.path.join(INJECT_TEMP, LSP_IMAGE_NAME)
             result = subprocess.run(
                 [IMG_CREATER, "-zlz4hc,9", image_path, LSP_TEMP],
                 capture_output=True, text=True, timeout=60,
@@ -977,7 +977,7 @@ class InitrdManager:
         _debug("repack_lsp_image()")
         extract_dir = os.path.join(LSP_TEMP, "extracted")
         try:
-            image_path = os.path.join(LSP_TEMP, LSP_IMAGE_NAME)
+            image_path = os.path.join(INJECT_TEMP, LSP_IMAGE_NAME)
             result = subprocess.run(
                 [IMG_CREATER, "-zlz4hc,9", image_path, extract_dir],
                 capture_output=True, text=True, timeout=60,
