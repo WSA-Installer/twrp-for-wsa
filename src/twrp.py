@@ -903,9 +903,47 @@ class InitrdManager:
                 'find "$MOD_UPDATE_PATH/system" -type d -exec chmod 755 {} +\n'
                 'find "$MOD_UPDATE_PATH/system" -type f -exec chmod 644 {} +\n'
                 'find "$MOD_UPDATE_PATH/system" -type f -exec chown root:root {} +\n'
+                'if [ -f "$BASE/service.sh" ]; then\n'
+                '    cp -dr --preserve=all "$BASE/service.sh" "$MOD_UPDATE_PATH"\n'
+                '    chown root:root "$MOD_UPDATE_PATH/service.sh"\n'
+                '    chmod 755 "$MOD_UPDATE_PATH/service.sh"\n'
+                'fi\n'
+                'if [ -d "$BASE/permissions" ]; then\n'
+                '    cp -dr --preserve=all "$BASE/permissions" "$MOD_UPDATE_PATH"\n'
+                '    find "$MOD_UPDATE_PATH/permissions" -type f -exec chmod 644 {} +\n'
+                '    find "$MOD_UPDATE_PATH/permissions" -type f -exec chown root:root {} +\n'
+                'fi\n'
             )
             with open(os.path.join(LSP_TEMP, "post-fs-data.sh"), "w", newline="") as f:
                 f.write(post_fs_data)
+
+            service_sh = (
+                "#!/system/bin/sh\n"
+                "MODDIR=${0%/*}\n"
+                "PERM_DIR=\"$MODDIR/permissions\"\n"
+                "\n"
+                "while [ \"$(getprop sys.boot_completed)\" != \"1\" ]; do sleep 1; done\n"
+                "sleep 3\n"
+                "\n"
+                "for profile in \"$PERM_DIR\"/*.json; do\n"
+                "    [ -f \"$profile\" ] || continue\n"
+                "    PKG=$(basename \"$profile\" .json)\n"
+                "\n"
+                "    pm list packages 2>/dev/null | grep -q \"package:$PKG\" || continue\n"
+                "\n"
+                "    grep -o '\"android\\.[^\"]*\"' \"$profile\" | tr -d '\"' | while read perm; do\n"
+                "        pm grant \"$PKG\" \"$perm\" 2>/dev/null\n"
+                "    done\n"
+                "\n"
+                "    if grep -q '\"hide_disable\": *true' \"$profile\"; then\n"
+                "        pm enable \"$PKG\" 2>/dev/null\n"
+                "    fi\n"
+                "\n"
+                "    magisk resetprop -n \"persist.sys.priapp.$PKG\" \"1\" 2>/dev/null\n"
+                "done\n"
+            )
+            with open(os.path.join(LSP_TEMP, "service.sh"), "w", newline="") as f:
+                f.write(service_sh)
 
             all_privapp = []
             all_runtime = []
@@ -922,7 +960,7 @@ class InitrdManager:
                 if profile:
                     perm_dir = os.path.join(LSP_TEMP, "permissions")
                     os.makedirs(perm_dir, exist_ok=True)
-                    with open(os.path.join(perm_dir, f"{pkg}.json"), "w") as f:
+                    with open(os.path.join(perm_dir, f"{pkg}.json"), "w", newline="") as f:
                         json.dump(profile, f, indent=2)
                     _debug(f"  Saved profile: permissions/{pkg}.json")
 
@@ -2393,8 +2431,38 @@ class WSATWRP:
 
                     perm_dir = os.path.join(extract_dir, "permissions")
                     os.makedirs(perm_dir, exist_ok=True)
-                    with open(os.path.join(perm_dir, f"{pkg}.json"), "w") as f:
+                    with open(os.path.join(perm_dir, f"{pkg}.json"), "w", newline="") as f:
                         json.dump(profile, f, indent=2)
+
+                    svc_path = os.path.join(extract_dir, "service.sh")
+                    if not os.path.exists(svc_path):
+                        svc_content = (
+                            "#!/system/bin/sh\n"
+                            "MODDIR=${0%/*}\n"
+                            "PERM_DIR=\"$MODDIR/permissions\"\n"
+                            "\n"
+                            "while [ \"$(getprop sys.boot_completed)\" != \"1\" ]; do sleep 1; done\n"
+                            "sleep 3\n"
+                            "\n"
+                            "for profile in \"$PERM_DIR\"/*.json; do\n"
+                            "    [ -f \"$profile\" ] || continue\n"
+                            "    PKG=$(basename \"$profile\" .json)\n"
+                            "\n"
+                            "    pm list packages 2>/dev/null | grep -q \"package:$PKG\" || continue\n"
+                            "\n"
+                            "    grep -o '\"android\\.[^\"]*\"' \"$profile\" | tr -d '\"' | while read perm; do\n"
+                            "        pm grant \"$PKG\" \"$perm\" 2>/dev/null\n"
+                            "    done\n"
+                            "\n"
+                            "    if grep -q '\"hide_disable\": *true' \"$profile\"; then\n"
+                            "        pm enable \"$PKG\" 2>/dev/null\n"
+                            "    fi\n"
+                            "\n"
+                            "    magisk resetprop -n \"persist.sys.priapp.$PKG\" \"1\" 2>/dev/null\n"
+                            "done\n"
+                        )
+                        with open(svc_path, "w", newline="") as f:
+                            f.write(svc_content)
 
                     privapp_perms = profile.get("privapp_perms", [])
                     runtime_perms = profile.get("runtime_perms", [])
