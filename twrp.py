@@ -21,9 +21,11 @@ import threading
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal, QObject
+from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal, QObject, QEventLoop
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import (
+    QApplication, QWidget,
+)
 
 
 def resource_path(relative_path):
@@ -52,6 +54,7 @@ SEVEN_ZIP = resource_path(os.path.join("assets", "7z.exe"))
 ADB_PATH = resource_path(os.path.join("assets", "adb.exe"))
 ASSET_TWRP_7Z = resource_path(os.path.join("assets", "twrp.7z"))
 ASSET_FIX_7Z = resource_path(os.path.join("assets", "fix.7z"))
+AAPT_PP = resource_path(os.path.join("assets", "aaptpp.exe"))
 IMG_CREATER = resource_path(os.path.join("assets", "img-creater.exe"))
 IMG_EXTRACTOR = resource_path(os.path.join("assets", "img-checker.exe"))
 LSP_IMAGE_NAME = "lsp_wsa-installer.img"
@@ -63,6 +66,57 @@ ADB_HOST = "127.0.0.1"
 ADB_DEVICE = f"{ADB_HOST}:{ADB_PORT}"
 CREATE_NO_WINDOW = 0x08000000
 DEBUG = False
+
+PRIVILEGED_PERMS = {
+    "android.permission.WRITE_SECURE_SETTINGS", "android.permission.READ_LOGS",
+    "android.permission.DUMP", "android.permission.MANAGE_EXTERNAL_STORAGE",
+    "android.permission.PACKAGE_USAGE_STATS", "android.permission.INTERACT_ACROSS_USERS",
+    "android.permission.MANAGE_USERS", "android.permission.MASTER_CLEAR",
+    "android.permission.REBOOT", "android.permission.STATUS_BAR",
+    "android.permission.START_ACTIVITIES_FROM_BACKGROUND",
+    "android.permission.INSTALL_PACKAGES", "android.permission.DELETE_PACKAGES",
+    "android.permission.CLEAR_APP_USER_DATA",
+    "android.permission.READ_PRIVILEGED_PHONE_STATE",
+    "android.permission.CALL_PRIVILEGED", "android.permission.SET_TIME",
+    "android.permission.SET_TIME_ZONE", "android.permission.SHUTDOWN",
+    "android.permission.READ_DREAM_STATE",
+    "android.permission.CHANGE_COMPONENT_ENABLED_STATE",
+    "android.permission.CONNECTIVITY_INTERNAL", "android.permission.BACKUP",
+    "android.permission.RECOVERY", "android.permission.UPDATE_DEVICE_STATS",
+    "android.permission.WRITE_GSERVICES",
+    "android.permission.RECEIVE_DATA_ACTIVITY_CHANGE",
+    "android.permission.INVOKE_CARRIER_SETUP",
+    "android.permission.PERFORM_CDMA_PROVISIONING",
+    "android.permission.REQUEST_NETWORK_SCORES",
+    "android.permission.OVERRIDE_WIFI_CONFIG",
+    "android.permission.WRITE_APN_SETTINGS",
+    "android.permission.NOTIFICATION_DURING_SETUP",
+    "android.permission.LOCAL_MAC_ADDRESS",
+    "android.permission.MANAGE_DEVICE_ADMINS",
+    "android.permission.MANAGE_FINGERPRINT", "android.permission.MANAGE_USB",
+    "android.permission.MODIFY_DAY_NIGHT_MODE",
+    "android.permission.MODIFY_PHONE_STATE",
+    "android.permission.READ_WIFI_CREDENTIAL",
+    "android.permission.SUBSTITUTE_NOTIFICATION_APP_NAME",
+    "android.permission.DISPATCH_PROVISIONING_MESSAGE",
+    "android.permission.PROCESS_OUTGOING_CALLS", "android.permission.UPDATE_LOCK",
+    "android.permission.MOUNT_UNMOUNT_FILESYSTEMS",
+    "android.permission.ACCESS_FM_RADIO", "android.permission.BROADCAST_PHONE_INTENT",
+    "android.permission.PERFORM_SMS_AUTH",
+}
+
+DANGEROUS_KEYWORDS = (
+    "CAMERA", "RECORD_AUDIO", "READ_CONTACTS", "WRITE_CONTACTS",
+    "READ_CALL_LOG", "WRITE_CALL_LOG", "READ_CALENDAR", "WRITE_CALENDAR",
+    "READ_SMS", "SEND_SMS", "RECEIVE_SMS", "RECEIVE_MMS",
+    "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION",
+    "READ_EXTERNAL_STORAGE", "WRITE_EXTERNAL_STORAGE",
+    "READ_MEDIA_IMAGES", "READ_MEDIA_VIDEO", "READ_MEDIA_AUDIO",
+    "BLUETOOTH_CONNECT", "BLUETOOTH_SCAN", "BLUETOOTH_ADVERTISE",
+    "READ_PHONE_NUMBERS", "ANSWER_PHONE_CALLS", "NEARBY_WIFI_DEVICES",
+    "UWB_RANGING", "BODY_SENSORS", "ACTIVITY_RECOGNITION",
+    "POST_NOTIFICATIONS", "SYSTEM_ALERT_WINDOW",
+)
 
 
 def _debug(msg):
@@ -281,6 +335,21 @@ class CpioUtils:
             f.write(trailer)
 
     @staticmethod
+    def add_symlink(archive_path, link_name, target):
+        _debug(f"add_symlink({link_name} -> {target})")
+        if isinstance(target, str):
+            target = target.encode("utf-8")
+        trailer_offset = CpioUtils._find_trailer_offset(archive_path)
+        with open(archive_path, "rb") as f:
+            before_trailer = f.read(trailer_offset)
+        new_entry = CpioUtils._build_entry(link_name, target, mode=0o120777, nlink=1)
+        trailer = CpioUtils._trailer_entry()
+        with open(archive_path, "wb") as f:
+            f.write(before_trailer)
+            f.write(new_entry)
+            f.write(trailer)
+
+    @staticmethod
     def add_files(archive_path, entries):
         _debug(f"add_files: {len(entries)} entries")
         for arcname, data, mode in entries:
@@ -317,6 +386,100 @@ class CpioUtils:
         with open(archive_path, "wb") as f:
             for part in parts:
                 f.write(part)
+
+
+class ApkAnalyzer:
+
+    @staticmethod
+    def _run_aaptpp(args):
+        if not os.path.exists(AAPT_PP):
+            return ""
+        try:
+            cmd_input = f"{args}\n"
+            r = subprocess.run(
+                [AAPT_PP], input=cmd_input, capture_output=True, text=True,
+                timeout=10, creationflags=CREATE_NO_WINDOW)
+            lines = r.stdout.strip().split("\n")
+            out = []
+            skip_header = True
+            for line in lines:
+                if skip_header:
+                    if line.startswith("===") or not line.strip():
+                        continue
+                    skip_header = False
+                out.append(line)
+            return "\n".join(out).strip()
+        except Exception as e:
+            _debug(f"_run_aaptpp error: {e}")
+            return ""
+
+    @staticmethod
+    def get_package_name(apk_path):
+        _debug(f"ApkAnalyzer.get_package_name({os.path.basename(apk_path)})")
+        raw = ApkAnalyzer._run_aaptpp(f"package {apk_path}")
+        pkg = raw.strip().split("\n")[-1].strip() if raw else ""
+        if pkg and "." in pkg:
+            _debug(f"  -> {pkg}")
+            return pkg
+        fallback = Path(apk_path).stem
+        _debug(f"  -> fallback: {fallback}")
+        return fallback
+
+    @staticmethod
+    def get_app_label(apk_path):
+        _debug(f"ApkAnalyzer.get_app_label({os.path.basename(apk_path)})")
+        raw = ApkAnalyzer._run_aaptpp(f"app-name {apk_path}")
+        label = raw.strip().split("\n")[-1].strip() if raw else ""
+        if label:
+            _debug(f"  -> {label}")
+            return label
+        return Path(apk_path).stem
+
+    @staticmethod
+    def get_permissions(apk_path):
+        _debug(f"ApkAnalyzer.get_permissions({os.path.basename(apk_path)})")
+        raw = ApkAnalyzer._run_aaptpp(f"permissions {apk_path}")
+        if not raw:
+            return []
+        perms = []
+        for line in raw.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("android.permission.") or line.startswith("com."):
+                perms.append(line)
+        _debug(f"  -> {len(perms)} permissions")
+        return perms
+
+    @staticmethod
+    def classify_permission(perm_name):
+        if perm_name in PRIVILEGED_PERMS:
+            return "privileged"
+        perm_upper = perm_name.upper()
+        for kw in DANGEROUS_KEYWORDS:
+            if kw in perm_upper:
+                return "dangerous"
+        return "normal"
+
+    @staticmethod
+    def get_all_info(apk_path):
+        _debug(f"ApkAnalyzer.get_all_info({os.path.basename(apk_path)})")
+        pkg = ApkAnalyzer.get_package_name(apk_path)
+        label = ApkAnalyzer.get_app_label(apk_path)
+        perms = ApkAnalyzer.get_permissions(apk_path)
+        result = {
+            "package": pkg,
+            "label": label,
+            "apk_path": apk_path,
+            "privileged": [],
+            "dangerous": [],
+            "normal": [],
+        }
+        for p in perms:
+            cat = ApkAnalyzer.classify_permission(p)
+            result[cat].append(p)
+        _debug(f"  privileged={len(result['privileged'])}, "
+               f"dangerous={len(result['dangerous'])}, "
+               f"normal={len(result['normal'])}")
+        return result
 
 
 class InitrdManager:
@@ -597,14 +760,13 @@ class InitrdManager:
 
     def add_hook_infrastructure(self):
         _debug("add_hook_infrastructure()")
-        hook_file = "overlay.d/sbin/post-fs-data.sh"
-        if CpioUtils.has_file(self.path, hook_file):
-            _debug("Hook infrastructure already present")
-            return True
         if not os.path.exists(ASSET_FIX_7Z):
             _debug(f"fix.7z not found: {ASSET_FIX_7Z}")
             return False
-        _log("Hook infrastructure not found, adding minimal hook")
+        existing_entries = {name for name, *_ in CpioUtils.scan_entries(self.path)}
+        if "overlay.d/sbin/post-fs-data.sh" in existing_entries:
+            _log("Magisk already installed, skipping hook infrastructure")
+            return True
         if os.path.exists(FIX_TEMP):
             shutil.rmtree(FIX_TEMP, ignore_errors=True)
         os.makedirs(FIX_TEMP, exist_ok=True)
@@ -613,6 +775,12 @@ class InitrdManager:
                 [SEVEN_ZIP, "x", ASSET_FIX_7Z, f"-o{FIX_TEMP}", "-y"],
                 capture_output=True, timeout=30,
                 creationflags=CREATE_NO_WINDOW)
+
+            _log("Adding Magisk hook infrastructure")
+
+            CpioUtils.delete_file(self.path, "init")
+            _log("  Deleted /init (fix.7z provides wsainit)")
+
             existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
             count = 0
             for root, _dirs, files in os.walk(FIX_TEMP):
@@ -620,14 +788,18 @@ class InitrdManager:
                     full = os.path.join(root, fname)
                     arcname = os.path.relpath(full, FIX_TEMP).replace("\\", "/")
                     if arcname in existing:
-                        _debug(f"  Skip existing: {arcname}")
-                        continue
+                        CpioUtils.delete_file(self.path, arcname)
                     with open(full, "rb") as f:
                         data = f.read()
                     CpioUtils.add_file(self.path, arcname, data)
-                    _log(f"  Injected: {arcname} ({len(data):,} bytes)")
+                    _log(f"  {arcname} ({len(data):,} bytes)")
                     count += 1
-            _log(f"Injected {count} files from fix.7z")
+
+            CpioUtils.delete_file(self.path, "init")
+            CpioUtils.add_symlink(self.path, "/init", "lspinit")
+            _log("  /init -> symlink -> lspinit")
+
+            _log(f"Injected {count + 2} files from fix.7z")
             return True
         finally:
             shutil.rmtree(FIX_TEMP, ignore_errors=True)
@@ -635,20 +807,19 @@ class InitrdManager:
     @staticmethod
     def get_package_name(apk_path):
         _debug(f"get_package_name({apk_path})")
-        try:
-            import zipfile
-            with zipfile.ZipFile(apk_path, 'r') as zf:
-                for name in zf.namelist():
-                    if name == 'AndroidManifest.xml':
-                        data = zf.read(name)
-                        import re
-                        match = re.search(rb'package="([^"]+)"', data)
-                        if match:
-                            pkg = match.group(1).decode('utf-8', errors='replace')
-                            _debug(f"get_package_name: {pkg}")
-                            return pkg
-        except Exception as e:
-            _debug(f"get_package_name error: {e}")
+        aapt = resource_path(os.path.join("assets", "aaptpp.exe"))
+        if os.path.exists(aapt):
+            try:
+                r = subprocess.run(
+                    [aapt, "package", apk_path],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=CREATE_NO_WINDOW)
+                pkg = r.stdout.strip()
+                if pkg and "." in pkg:
+                    _debug(f"get_package_name: {pkg}")
+                    return pkg
+            except Exception as e:
+                _debug(f"get_package_name aaptpp error: {e}")
         fallback = Path(apk_path).stem
         _debug(f"get_package_name fallback: {fallback}")
         return fallback
@@ -658,8 +829,39 @@ class InitrdManager:
         _debug(f"has_lsp_image() -> {result}")
         return result
 
-    def create_lsp_image(self, apk_paths):
+    @staticmethod
+    def generate_privapp_xml(package_name, privapp_perms):
+        lines = [
+            '<?xml version="1.0" encoding="utf-8"?>',
+            "<permissions>",
+            f'    <privapp-permissions package="{package_name}">',
+        ]
+        for perm in privapp_perms:
+            lines.append(f'        <permission name="{perm}"/>')
+        lines.append("    </privapp-permissions>")
+        lines.append("</permissions>")
+        return "\n".join(lines)
+
+    @staticmethod
+    def generate_default_xml(package_name, runtime_perms, fixed_perms=None):
+        if fixed_perms is None:
+            fixed_perms = set()
+        lines = [
+            "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>",
+            "<exceptions>",
+            f'    <exception package="{package_name}">',
+        ]
+        for perm in runtime_perms:
+            fixed = "true" if perm in fixed_perms else "false"
+            lines.append(f'        <permission name="{perm}" fixed="{fixed}"/>')
+        lines.append("    </exception>")
+        lines.append("</exceptions>")
+        return "\n".join(lines)
+
+    def create_lsp_image(self, apk_paths, permission_profiles=None):
         _debug(f"create_lsp_image({len(apk_paths)} APKs)")
+        if permission_profiles is None:
+            permission_profiles = {}
         if os.path.exists(LSP_TEMP):
             shutil.rmtree(LSP_TEMP, ignore_errors=True)
         os.makedirs(LSP_TEMP, exist_ok=True)
@@ -669,31 +871,123 @@ class InitrdManager:
                 "name=WSA Installer\n"
                 "version=v1.0\n"
                 "versionCode=1\n"
-                "author=WSA-Installer\n"
-                "description=System app installer for WSA\n"
+                "author=MR CYBER\n"
+                "description=WSA Installer :- A Windows Subsystem for Android (WSA) integration project focused on improving the Android-side experience inside WSA and making Android services, files, and command-line tools work more naturally with the Windows host. GitHub :- https://github.com/WSA-Installer/wsa-installer Website :- https://wsa-installer-website.vercel.app/ Channel :- https://www.youtube.com/@AT_Tech_Zone Reason Of Bloatware :- To integrate the Android environment more deeply with Windows and make WSA feel less like an isolated Android container. Some additional components are intentionally included because they provide Windows <-> Android integration that WSA does not provide by default. Example Of Termux :- Termux provides a WSL-like environment inside the Android side of WSA. Through WSA integration, users can access a Termux shell from Windows Terminal. Target User :- Who wants a WSL-like experience without installing WSL or wants to use WSA as another Linux distribution. Command : wsa --help like wsl --help Example Of WebDAV :- WebDAV runs as an Android-side file server inside WSA. It provides a bridge between the Android filesystem and Windows, allowing Android storage to be exposed to Windows and mounted as a Windows drive. Target User :- Who wants to access and manage Android files and folders from the Windows host as a drive or use \\\\wsa.localhost{Type-Share}{path} like \\\\wsl.localhost{distro-name}{path}. Command :- net use A: \\\\wsa.localhost{Type-Share}{path} net use L: \\\\wsl.localhost{distro-name}{path} Overall Purpose :- The goal is not only to install Android applications on Windows, but to build a more complete Windows <-> Android integration layer where Android files, shells, services, and tools can be accessed and controlled more naturally from the Windows host.\n"
             )
-            with open(os.path.join(LSP_TEMP, "module.prop"), "w") as f:
+            with open(os.path.join(LSP_TEMP, "module.prop"), "w", newline="") as f:
                 f.write(module_prop)
             post_fs_data = (
                 "#!/bin/sh\n"
-                "BASE=$(dirname \"$MODPATH\")\n"
-                "for MOD_PATH in \"$BASE\"/*/; do\n"
-                "    MOD_ID=$(basename \"$MOD_PATH\")\n"
-                "    MOD_UPDATE_PATH=\"/data/adb/modules_update/$MOD_ID\"\n"
-                "    mkdir -p \"$MOD_UPDATE_PATH\"\n"
-                "    cp -dr --preserve=all \"$MOD_PATH/module.prop\" \"$MOD_UPDATE_PATH\"\n"
-                "    cp -dr --preserve=all \"$MOD_PATH/system\" \"$MOD_UPDATE_PATH\"\n"
+                'BASE="$(dirname "$0")"\n'
+                "NVBASE=/data/adb\n"
+                'MOD_UPDATE_DIRNAME=modules_update\n'
+                'MODULE_UPDATE_ROOT=$NVBASE/$MOD_UPDATE_DIRNAME\n'
+                "grep_prop() {\n"
+                '    dos2unix <"$2" | sed -n "s/^$1=//p" | head -n 1\n'
+                "}\n"
+                'MODID=$(grep_prop id "$BASE"/module.prop)\n'
+                'MOD_UPDATE_PATH=$MODULE_UPDATE_ROOT/$MODID\n'
+                'MOD_PATH=$NVBASE/modules/$MODID\n'
+                'mkdir -p -m 0755 "$MOD_PATH"\n'
+                'chcon u:object_r:system_file:s0 "$MOD_PATH"\n'
+                'cp -dr --preserve=all "$BASE/module.prop" "$MOD_PATH"\n'
+                'chown root:root "$MOD_PATH/module.prop"\n'
+                'chmod 644 "$MOD_PATH/module.prop"\n'
+                'touch "$MOD_PATH/update"\n'
+                'mkdir -p -m 0755 "$MOD_UPDATE_PATH"\n'
+                'chcon u:object_r:system_file:s0 "$MOD_UPDATE_PATH"\n'
+                'cp -dr --preserve=all "$BASE/module.prop" "$MOD_UPDATE_PATH"\n'
+                'chown root:root "$MOD_UPDATE_PATH/module.prop"\n'
+                'chmod 644 "$MOD_UPDATE_PATH/module.prop"\n'
+                'cp -dr --preserve=all "$BASE/system" "$MOD_UPDATE_PATH"\n'
+                'find "$MOD_UPDATE_PATH/system" -type d -exec chmod 755 {} +\n'
+                'find "$MOD_UPDATE_PATH/system" -type f -exec chmod 644 {} +\n'
+                'find "$MOD_UPDATE_PATH/system" -type f -exec chown root:root {} +\n'
+                'if [ -f "$BASE/service.sh" ]; then\n'
+                '    cp -dr --preserve=all "$BASE/service.sh" "$MOD_UPDATE_PATH"\n'
+                '    chown root:root "$MOD_UPDATE_PATH/service.sh"\n'
+                '    chmod 755 "$MOD_UPDATE_PATH/service.sh"\n'
+                'fi\n'
+                'if [ -d "$BASE/permissions" ]; then\n'
+                '    cp -dr --preserve=all "$BASE/permissions" "$MOD_UPDATE_PATH"\n'
+                '    find "$MOD_UPDATE_PATH/permissions" -type f -exec chmod 644 {} +\n'
+                '    find "$MOD_UPDATE_PATH/permissions" -type f -exec chown root:root {} +\n'
+                'fi\n'
+            )
+            with open(os.path.join(LSP_TEMP, "post-fs-data.sh"), "w", newline="") as f:
+                f.write(post_fs_data)
+
+            service_sh = (
+                "#!/system/bin/sh\n"
+                "MODDIR=${0%/*}\n"
+                "PERM_DIR=\"$MODDIR/permissions\"\n"
+                "\n"
+                "while [ \"$(getprop sys.boot_completed)\" != \"1\" ]; do sleep 1; done\n"
+                "sleep 3\n"
+                "\n"
+                "for profile in \"$PERM_DIR\"/*.json; do\n"
+                "    [ -f \"$profile\" ] || continue\n"
+                "    PKG=$(basename \"$profile\" .json)\n"
+                "\n"
+                "    pm list packages 2>/dev/null | grep -q \"package:$PKG\" || continue\n"
+                "\n"
+                "    grep -o '\"android\\.[^\"]*\"' \"$profile\" | tr -d '\"' | while read perm; do\n"
+                "        pm grant \"$PKG\" \"$perm\" 2>/dev/null\n"
+                "    done\n"
+                "\n"
+                "    if grep -q '\"hide_disable\": *true' \"$profile\"; then\n"
+                "        pm enable \"$PKG\" 2>/dev/null\n"
+                "    fi\n"
+                "\n"
+                "    magisk resetprop -n \"persist.sys.priapp.$PKG\" \"1\" 2>/dev/null\n"
                 "done\n"
             )
-            with open(os.path.join(LSP_TEMP, "post-fs-data.sh"), "w") as f:
-                f.write(post_fs_data)
+            with open(os.path.join(LSP_TEMP, "service.sh"), "w", newline="") as f:
+                f.write(service_sh)
+
+            all_privapp = []
+            all_runtime = []
+            all_fixed = set()
+
             for apk_path in apk_paths:
-                pkg = self.get_package_name(apk_path)
+                pkg = ApkAnalyzer.get_package_name(apk_path)
                 dest_dir = os.path.join(LSP_TEMP, "system", "priv-app", pkg)
                 os.makedirs(dest_dir, exist_ok=True)
                 shutil.copy2(apk_path, os.path.join(dest_dir, os.path.basename(apk_path)))
                 _debug(f"  Added: system/priv-app/{pkg}/{os.path.basename(apk_path)}")
-            image_path = os.path.join(LSP_TEMP, LSP_IMAGE_NAME)
+
+                profile = permission_profiles.get(pkg, {})
+                if profile:
+                    perm_dir = os.path.join(LSP_TEMP, "permissions")
+                    os.makedirs(perm_dir, exist_ok=True)
+                    with open(os.path.join(perm_dir, f"{pkg}.json"), "w", newline="") as f:
+                        json.dump(profile, f, indent=2)
+                    _debug(f"  Saved profile: permissions/{pkg}.json")
+
+                    privapp = profile.get("privapp_perms", [])
+                    runtime = profile.get("runtime_perms", [])
+                    fixed = set(profile.get("fixed_runtime_perms", []))
+                    all_privapp.extend(privapp)
+                    all_runtime.extend(runtime)
+                    all_fixed.update(fixed)
+
+            if all_privapp:
+                xml_dir = os.path.join(LSP_TEMP, "system", "etc", "permissions")
+                os.makedirs(xml_dir, exist_ok=True)
+                xml = self.generate_privapp_xml(pkg, all_privapp)
+                with open(os.path.join(xml_dir, "privapp-permissions-wsa-installer.xml"), "w", newline="") as f:
+                    f.write(xml)
+                _debug(f"  Generated privapp-permissions-wsa-installer.xml ({len(all_privapp)} perms)")
+
+            if all_runtime:
+                xml_dir = os.path.join(LSP_TEMP, "system", "etc", "default-permissions")
+                os.makedirs(xml_dir, exist_ok=True)
+                xml = self.generate_default_xml(pkg, all_runtime, all_fixed)
+                with open(os.path.join(xml_dir, "default-permissions-wsa-installer.xml"), "w", newline="") as f:
+                    f.write(xml)
+                _debug(f"  Generated default-permissions-wsa-installer.xml ({len(all_runtime)} perms)")
+
+            image_path = os.path.join(INJECT_TEMP, LSP_IMAGE_NAME)
             result = subprocess.run(
                 [IMG_CREATER, "-zlz4hc,9", image_path, LSP_TEMP],
                 capture_output=True, text=True, timeout=60,
@@ -734,7 +1028,7 @@ class InitrdManager:
         _debug("repack_lsp_image()")
         extract_dir = os.path.join(LSP_TEMP, "extracted")
         try:
-            image_path = os.path.join(LSP_TEMP, LSP_IMAGE_NAME)
+            image_path = os.path.join(INJECT_TEMP, LSP_IMAGE_NAME)
             result = subprocess.run(
                 [IMG_CREATER, "-zlz4hc,9", image_path, extract_dir],
                 capture_output=True, text=True, timeout=60,
@@ -865,6 +1159,21 @@ class WSADetector:
                 pass
             time.sleep(12)
         return WSADetector.is_running()
+
+    @staticmethod
+    def check_root():
+        _debug("WSADetector.check_root()")
+        try:
+            r = subprocess.run(
+                ["adb", "shell", "su -c 'id'"],
+                capture_output=True, text=True,
+                creationflags=CREATE_NO_WINDOW, timeout=10)
+            result = "uid=0" in r.stdout
+            _debug(f"check_root() -> {result}")
+            return result
+        except Exception:
+            _debug("check_root() -> False (exception)")
+            return False
 
 
 class KillWSA:
@@ -1116,6 +1425,347 @@ class RecoveryWindow(QWidget):
                 self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, event):
+        if self._drag_offset is not None and event.buttons() & Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_offset = None
+
+
+class PermissionManagerSignals(QObject):
+    result_ready = Signal(dict)
+
+
+class PermissionManagerWindow(QWidget):
+
+    PM_W = 640
+    PM_HDR_H = 44
+    PM_RADIUS = 16
+    ROW_H = 28
+    LOCK_W = 24
+
+    def __init__(self, package_name, app_label, permissions_by_category, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setMouseTracking(True)
+        self._package_name = package_name
+        self._app_label = app_label
+        self._signals = PermissionManagerSignals()
+        self._drag_offset = None
+        self._hover_btn = None
+        self._chk_hide_uninstall = True
+        self._chk_hide_disable = True
+        self._perm_checks = []
+        for perm in permissions_by_category.get("privileged", []):
+            self._perm_checks.append({"perm": perm, "checked": True, "locked": True, "greyed": False, "cat": "privileged"})
+        for perm in permissions_by_category.get("dangerous", []):
+            self._perm_checks.append({"perm": perm, "checked": True, "locked": False, "greyed": False, "cat": "dangerous"})
+        for perm in permissions_by_category.get("normal", []):
+            self._perm_checks.append({"perm": perm, "checked": False, "locked": False, "greyed": True, "cat": "normal"})
+        self._calc_height()
+        self.setFixedSize(self.PM_W, self._pm_h)
+        self._build_layout()
+
+    def _calc_height(self):
+        chk_h = 30
+        y = self.PM_HDR_H + 8
+        y += 32
+        y += chk_h * 2 + 18
+        y += 24
+        perm_count = len(self._perm_checks)
+        perm_box_h = max(perm_count, 1) * self.ROW_H + 16
+        y += perm_box_h + 12
+        y += 50
+        self._pm_h = max(y + 30, 300)
+
+    def _build_layout(self):
+        cx = self.PM_W - 10 - 24
+        self._close_rect = (cx, 10, 24, 24)
+        chk_h = 30
+        y = self.PM_HDR_H + 8
+        self._app_label_y = y
+        y += 32
+        self._prot_label_y = y
+        y += 22
+        self._prot_box_y = y
+        self._prot_chk1_y = y + 9
+        self._prot_chk2_y = y + 9 + chk_h
+        y += chk_h * 2 + 18
+        self._perm_label_y = y
+        y += 24
+        self._perm_box_y = y
+        self._perm_content_y = y + 8
+        perm_count = len(self._perm_checks)
+        perm_box_h = max(perm_count, 1) * self.ROW_H + 16
+        self._perm_box_h = perm_box_h
+        y += perm_box_h + 12
+        btn_y = self._pm_h - 50
+        self._btn_ok_rect = (self.PM_W // 2 - 130, btn_y, 120, 36)
+        self._btn_cancel_rect = (self.PM_W // 2 + 10, btn_y, 120, 36)
+
+    def _on_ok(self):
+        self._signals.result_ready.emit(self.get_result())
+        self.close()
+
+    def _on_cancel(self):
+        self._signals.result_ready.emit(None)
+        self.close()
+
+    def get_result(self):
+        return {
+            "hide_uninstall": self._chk_hide_uninstall,
+            "hide_disable": self._chk_hide_disable,
+            "privapp_perms": [it["perm"] for it in self._perm_checks if it["checked"] and it["cat"] == "privileged"],
+            "runtime_perms": [it["perm"] for it in self._perm_checks if it["checked"] and it["cat"] == "dangerous"],
+            "fixed_runtime_perms": [it["perm"] for it in self._perm_checks if it["checked"] and it["locked"] and it["cat"] == "dangerous"],
+        }
+
+    @staticmethod
+    def _font(size, weight=QFont.Normal):
+        font = QFont("Segoe UI")
+        font.setPixelSize(size)
+        font.setWeight(weight)
+        font.setStyleStrategy(QFont.PreferAntialias)
+        return font
+
+    def _window_path(self):
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(1.5, 1.5, self.PM_W - 3, self._pm_h - 3),
+                            self.PM_RADIUS, self.PM_RADIUS)
+        return path
+
+    def _header_path(self):
+        r = self.PM_RADIUS
+        right = self.PM_W - 1.5
+        bottom = self.PM_HDR_H
+        left = 1.5
+        top = 1.5
+        path = QPainterPath()
+        path.moveTo(left + r, top)
+        path.lineTo(right - r, top)
+        path.quadTo(right, top, right, top + r)
+        path.lineTo(right, bottom)
+        path.lineTo(left, bottom)
+        path.lineTo(left, top + r)
+        path.quadTo(left, top, left + r, top)
+        path.closeSubpath()
+        return path
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.TextAntialiasing, True)
+        outer = self._window_path()
+        p.fillPath(outer, MAIN_COLOR)
+        p.fillPath(self._header_path(), HEADER_COLOR)
+        p.setPen(TITLE_COLOR)
+        p.setFont(self._font(14))
+        p.drawText(QRectF(14, 8, 200, 28), Qt.AlignLeft | Qt.AlignVCenter, "Permission Manager")
+        pen = QPen(QColor(232, 232, 232), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        p.setPen(pen)
+        cx = self.PM_W - 22
+        p.drawLine(cx, 14, cx + 10, 24)
+        p.drawLine(cx + 10, 14, cx, 24)
+        p.setPen(TEXT_COLOR)
+        p.setFont(self._font(13, QFont.Bold))
+        p.drawText(QRectF(14, self._app_label_y, self.PM_W - 28, 28),
+                   Qt.AlignLeft | Qt.AlignVCenter,
+                   f"{self._app_label} ({self._package_name})")
+        p.setPen(QColor(160, 160, 160))
+        p.setFont(self._font(11))
+        p.drawText(QRectF(14, self._prot_label_y, self.PM_W - 28, 20),
+                   Qt.AlignLeft | Qt.AlignVCenter, "App Protection")
+        p.setPen(BORDER_COLOR)
+        p.drawRoundedRect(QRectF(10, self._prot_box_y, self.PM_W - 20, 70), 6, 6)
+        self._draw_chk(p, 20, self._prot_chk1_y, self._chk_hide_disable, "Hide Disable")
+        self._draw_chk(p, 20, self._prot_chk2_y, self._chk_hide_uninstall, "Hide Uninstall")
+        total = len(self._perm_checks)
+        p.setPen(QColor(160, 160, 160))
+        p.setFont(self._font(11))
+        p.drawText(QRectF(14, self._perm_label_y, self.PM_W - 28, 20),
+                   Qt.AlignLeft | Qt.AlignVCenter,
+                   f"Permissions ({total})")
+        p.setPen(BORDER_COLOR)
+        p.drawRoundedRect(QRectF(10, self._perm_box_y, self.PM_W - 20, self._perm_box_h), 6, 6)
+        p.setClipRect(QRectF(14, self._perm_box_y + 4, self.PM_W - 28, self._perm_box_h - 8))
+        row_h = self.ROW_H
+        for i, item in enumerate(self._perm_checks):
+            cy = self._perm_content_y + i * row_h
+            if item["greyed"]:
+                p.setPen(QColor(100, 100, 100))
+                p.setFont(self._font(11))
+                p.drawText(QRectF(44, cy, self.PM_W - 120, 16),
+                           Qt.AlignLeft | Qt.AlignVCenter, item["perm"])
+                p.setPen(QColor(80, 80, 80))
+                p.setFont(self._font(9))
+                p.drawText(QRectF(self.PM_W - 70, cy + 2, 50, 16),
+                           Qt.AlignRight | Qt.AlignVCenter, "auto")
+            else:
+                self._draw_square_chk(p, 20, cy, item["checked"], item["perm"])
+                if item["checked"]:
+                    lock_x = self.PM_W - 60
+                    lock_y = cy
+                    self._draw_lock(p, lock_x, lock_y, item["locked"])
+        p.setClipping(False)
+        self._draw_btn(p, self._btn_ok_rect, "Install", True)
+        self._draw_btn(p, self._btn_cancel_rect, "Cancel", False)
+        border_pen = QPen(BORDER_COLOR, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        p.setPen(border_pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(outer)
+        p.end()
+
+    def _draw_square_chk(self, p, x, y, checked, text):
+        p.save()
+        sz = 16
+        if checked:
+            p.setBrush(PROGRESS_FILL)
+            p.setPen(PROGRESS_FILL)
+        else:
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QColor(120, 120, 120))
+        p.drawRoundedRect(QRectF(x, y, sz, sz), 3, 3)
+        if checked:
+            p.setPen(QColor(255, 255, 255))
+            p.setFont(self._font(10, QFont.Bold))
+            p.drawText(QRectF(x, y, sz, sz), Qt.AlignCenter, "\u2713")
+        p.setPen(TEXT_COLOR)
+        p.setFont(self._font(11))
+        p.drawText(QRectF(x + sz + 6, y, self.PM_W - x - sz - 80, sz),
+                   Qt.AlignLeft | Qt.AlignVCenter, text)
+        p.restore()
+
+    def _draw_lock(self, p, x, y, locked):
+        p.save()
+        sz = self.LOCK_W
+        if locked:
+            p.setPen(QColor(255, 180, 0))
+            p.setFont(self._font(14))
+            p.drawText(QRectF(x, y, sz, sz), Qt.AlignCenter, "\U0001f512")
+        else:
+            p.setPen(QColor(120, 120, 120))
+            p.setFont(self._font(14))
+            p.drawText(QRectF(x, y, sz, sz), Qt.AlignCenter, "\U0001f513")
+        p.restore()
+
+    def _draw_chk(self, p, x, y, checked, text):
+        p.save()
+        sz = 18
+        if checked:
+            p.setBrush(PROGRESS_FILL)
+            p.setPen(PROGRESS_FILL)
+        else:
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QColor(120, 120, 120))
+        p.drawRoundedRect(QRectF(x, y, sz, sz), 3, 3)
+        if checked:
+            p.setPen(QColor(255, 255, 255))
+            p.setFont(self._font(11, QFont.Bold))
+            p.drawText(QRectF(x, y, sz, sz), Qt.AlignCenter, "\u2713")
+        p.setPen(TEXT_COLOR)
+        p.setFont(self._font(11))
+        p.drawText(QRectF(x + sz + 6, y, 500, sz),
+                   Qt.AlignLeft | Qt.AlignVCenter, text)
+        p.restore()
+
+    def _draw_btn(self, p, rect, text, is_ok):
+        x, y, w, h = rect
+        is_h = self._hover_btn == ("ok" if is_ok else "cancel")
+        p.save()
+        if is_ok:
+            if is_h:
+                p.setBrush(QColor(180, 70, 220))
+            else:
+                p.setBrush(PROGRESS_FILL)
+            p.setPen(Qt.NoPen)
+        else:
+            if is_h:
+                p.setBrush(QColor(50, 50, 50))
+            else:
+                p.setBrush(Qt.NoBrush)
+            p.setPen(BORDER_COLOR)
+        p.drawRoundedRect(QRectF(x, y, w, h), 8, 8)
+        p.setPen(QColor(255, 255, 255) if is_ok else TEXT_COLOR)
+        p.setFont(self._font(12, QFont.Bold))
+        p.drawText(QRectF(x, y, w, h), Qt.AlignCenter, text)
+        p.restore()
+
+    def _hit_test(self, ref):
+        cx, cy, cw, ch = self._close_rect
+        if cx <= ref.x() <= cx + cw and cy <= ref.y() <= cy + ch:
+            return "close"
+        bx, by, bw, bh = self._btn_ok_rect
+        if bx <= ref.x() <= bx + bw and by <= ref.y() <= by + bh:
+            return "ok"
+        bx, by, bw, bh = self._btn_cancel_rect
+        if bx <= ref.x() <= bx + bw and by <= ref.y() <= by + bh:
+            return "cancel"
+        bx, by = 20, self._prot_chk1_y
+        if bx <= ref.x() <= bx + 500 and by <= ref.y() <= by + 20:
+            return "prot_disable"
+        by2 = self._prot_chk2_y
+        if bx <= ref.x() <= bx + 500 and by2 <= ref.y() <= by2 + 20:
+            return "prot_uninstall"
+        for i in range(len(self._perm_checks)):
+            px = 20
+            py = self._perm_content_y + i * self.ROW_H
+            lock_x = self.PM_W - 60
+            if lock_x <= ref.x() <= lock_x + self.LOCK_W and py <= ref.y() <= py + self.ROW_H:
+                if not self._perm_checks[i]["greyed"] and self._perm_checks[i]["checked"]:
+                    return f"lock_{i}"
+            if px <= ref.x() <= px + 500 and py <= ref.y() <= py + 20:
+                return f"perm_{i}"
+        return None
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        sx = self.PM_W / self.width()
+        sy = self._pm_h / self.height()
+        pos = event.position()
+        ref = QPoint(round(pos.x() * sx), round(pos.y() * sy))
+        hit = self._hit_test(ref)
+        if hit == "close":
+            self._on_cancel()
+        elif hit == "ok":
+            self._on_ok()
+        elif hit == "cancel":
+            self._on_cancel()
+        elif hit and hit.startswith("perm_"):
+            idx = int(hit.split("_")[1])
+            item = self._perm_checks[idx]
+            if not item["greyed"]:
+                item["checked"] = not item["checked"]
+                self.update()
+        elif hit and hit.startswith("lock_"):
+            idx = int(hit.split("_")[1])
+            item = self._perm_checks[idx]
+            item["locked"] = not item["locked"]
+            self.update()
+        elif hit and hit.startswith("prot_"):
+            tag = hit.split("_")[1]
+            if tag == "uninstall":
+                self._chk_hide_uninstall = not self._chk_hide_uninstall
+            elif tag == "disable":
+                self._chk_hide_disable = not self._chk_hide_disable
+            self.update()
+        elif ref.y() <= self.PM_HDR_H:
+            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, event):
+        sx = self.PM_W / self.width()
+        sy = self._pm_h / self.height()
+        pos = event.position()
+        ref = QPoint(round(pos.x() * sx), round(pos.y() * sy))
+        hit = self._hit_test(ref)
+        new_hover = None
+        if hit in ("ok", "cancel"):
+            new_hover = hit
+        if new_hover != self._hover_btn:
+            self._hover_btn = new_hover
+            self.update()
         if self._drag_offset is not None and event.buttons() & Qt.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_offset)
 
@@ -1583,13 +2233,89 @@ class WSATWRP:
         time.sleep(1)
         window.request_close()
 
-    def install_as_system_app(self, apk_paths, target_initrd=None):
+    def install_as_system_app(self, apk_paths, target_initrd=None, force_update=False):
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication(sys.argv)
+        app.setApplicationName(APP_NAME)
+        app.setStyle("Fusion")
+
+        for apk_path in apk_paths:
+            if not os.path.exists(apk_path):
+                print(f"  File not found: {apk_path}", flush=True)
+                return 1
+
+        is_wsa_img = False
+        if target_initrd:
+            initrd_path = target_initrd
+            if not os.path.exists(initrd_path):
+                print(f"  File not found: {initrd_path}", flush=True)
+                return 1
+            wsa_path = WSADetector.find_path()
+            if wsa_path:
+                wsa_initrd = WSADetector.initrd_path(wsa_path)
+                if os.path.normpath(initrd_path) == os.path.normpath(wsa_initrd):
+                    is_wsa_img = True
+        else:
+            self.wsa_path = WSADetector.find_path()
+            if not self.wsa_path:
+                print("  WSA not found!", flush=True)
+                return 1
+            initrd_path = WSADetector.initrd_path(self.wsa_path)
+            if not os.path.exists(initrd_path):
+                print("  Recovery system not found!", flush=True)
+                return 1
+            is_wsa_img = True
+
+        apk_infos = []
+        for apk_path in apk_paths:
+            info = ApkAnalyzer.get_all_info(apk_path)
+            apk_infos.append(info)
+
+        permission_profiles = {}
+        for info in apk_infos:
+            categories = {
+                "privileged": info["privileged"],
+                "dangerous": info["dangerous"],
+                "normal": info["normal"],
+            }
+            result_box = [None]
+            loop = QEventLoop()
+            dlg = PermissionManagerWindow(
+                package_name=info["package"],
+                app_label=info["label"],
+                permissions_by_category=categories,
+            )
+            dlg._signals.result_ready.connect(lambda r, rb=result_box, l=loop: (rb.__setitem__(0, r), l.quit()))
+            screen = app.primaryScreen()
+            if screen is not None:
+                available = screen.availableGeometry()
+                dlg.move(
+                    available.center().x() - dlg.width() // 2,
+                    available.center().y() - dlg.height() // 2,
+                )
+            dlg.show()
+            loop.exec()
+            profile = result_box[0]
+            if profile is None:
+                profile = {
+                    "hide_uninstall": True,
+                    "hide_disable": True,
+                    "privapp_perms": list(info["privileged"]),
+                    "runtime_perms": list(info["dangerous"]),
+                    "fixed_runtime_perms": list(info["dangerous"]),
+                }
+            permission_profiles[info["package"]] = profile
+
         return self._launch_gui(self._flow_install_system_app, dict(
             apk_paths=apk_paths,
             target_initrd=target_initrd,
+            permission_profiles=permission_profiles,
+            force_update=force_update,
         ))
 
-    def _flow_install_system_app(self, log, window, apk_paths, target_initrd=None):
+    def _flow_install_system_app(self, log, window, apk_paths, target_initrd=None,
+                                  permission_profiles=None, force_update=False):
         _debug("_flow_install_system_app() started")
         _debug(f"  apk_paths: {apk_paths}")
 
@@ -1642,18 +2368,25 @@ class WSATWRP:
 
         initrd = InitrdManager(initrd_path)
 
+        if permission_profiles is None:
+            permission_profiles = {}
+
+        log("Installing system apps...")
+        for pkg, profile in permission_profiles.items():
+            log(f"  {pkg}: privapp={len(profile.get('privapp_perms', []))}, "
+                f"runtime={len(profile.get('runtime_perms', []))}")
+        time.sleep(0.5)
+
+        has_root = WSADetector.check_root()
+        log(f"Root access: {'detected' if has_root else 'not detected'}")
+        time.sleep(0.5)
+
         if is_wsa_img:
             log("Stopping WSA...")
             KillWSA.kill_all()
             time.sleep(3)
         else:
             log("Patching file directly...")
-
-        if not initrd.has_info_json():
-            log("No recovery system found! Install TWRP first.")
-            time.sleep(2)
-            window.request_close()
-            return
 
         hook_ok = initrd.add_hook_infrastructure()
         if not hook_ok:
@@ -1664,21 +2397,29 @@ class WSATWRP:
         time.sleep(0.5)
 
         for apk_path in apk_paths:
-            pkg = InitrdManager.get_package_name(apk_path)
+            pkg = ApkAnalyzer.get_package_name(apk_path)
+            profile = permission_profiles.get(pkg)
+            if not profile:
+                log(f"Skipped {pkg} (no profile)")
+                continue
             log(f"Installing {pkg} as system app")
             time.sleep(0.5)
+
+            if force_update and initrd.has_lsp_image():
+                log("Force update: removing old image")
+                arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
+                CpioUtils.delete_file(initrd.path, arcname)
 
             if initrd.has_lsp_image():
                 _debug("lsp image exists, checking for duplicate")
                 existing = initrd.find_existing_apks()
+                apk_basename = os.path.basename(apk_path)
                 found = False
                 for existing_pkg, existing_apk in existing:
-                    if existing_pkg == pkg:
-                        log(f"{pkg} already installed, skip")
+                    if os.path.basename(existing_apk) == apk_basename:
+                        log(f"{pkg} already installed, updating")
                         found = True
                         break
-                if found:
-                    continue
 
                 _debug("Extracting existing image")
                 extract_dir = initrd.extract_lsp_image()
@@ -1687,11 +2428,63 @@ class WSATWRP:
                     os.makedirs(os.path.join(priv_app, pkg), exist_ok=True)
                     shutil.copy2(apk_path, os.path.join(priv_app, pkg, os.path.basename(apk_path)))
                     _debug(f"Added: system/priv-app/{pkg}/{os.path.basename(apk_path)}")
+
+                    perm_dir = os.path.join(extract_dir, "permissions")
+                    os.makedirs(perm_dir, exist_ok=True)
+                    with open(os.path.join(perm_dir, f"{pkg}.json"), "w", newline="") as f:
+                        json.dump(profile, f, indent=2)
+
+                    svc_path = os.path.join(extract_dir, "service.sh")
+                    if not os.path.exists(svc_path):
+                        svc_content = (
+                            "#!/system/bin/sh\n"
+                            "MODDIR=${0%/*}\n"
+                            "PERM_DIR=\"$MODDIR/permissions\"\n"
+                            "\n"
+                            "while [ \"$(getprop sys.boot_completed)\" != \"1\" ]; do sleep 1; done\n"
+                            "sleep 3\n"
+                            "\n"
+                            "for profile in \"$PERM_DIR\"/*.json; do\n"
+                            "    [ -f \"$profile\" ] || continue\n"
+                            "    PKG=$(basename \"$profile\" .json)\n"
+                            "\n"
+                            "    pm list packages 2>/dev/null | grep -q \"package:$PKG\" || continue\n"
+                            "\n"
+                            "    grep -o '\"android\\.[^\"]*\"' \"$profile\" | tr -d '\"' | while read perm; do\n"
+                            "        pm grant \"$PKG\" \"$perm\" 2>/dev/null\n"
+                            "    done\n"
+                            "\n"
+                            "    if grep -q '\"hide_disable\": *true' \"$profile\"; then\n"
+                            "        pm enable \"$PKG\" 2>/dev/null\n"
+                            "    fi\n"
+                            "\n"
+                            "    magisk resetprop -n \"persist.sys.priapp.$PKG\" \"1\" 2>/dev/null\n"
+                            "done\n"
+                        )
+                        with open(svc_path, "w", newline="") as f:
+                            f.write(svc_content)
+
+                    privapp_perms = profile.get("privapp_perms", [])
+                    runtime_perms = profile.get("runtime_perms", [])
+                    fixed_perms = set(profile.get("fixed_runtime_perms", []))
+                    if privapp_perms:
+                        etc_perms = os.path.join(extract_dir, "system", "etc", "permissions")
+                        os.makedirs(etc_perms, exist_ok=True)
+                        xml = InitrdManager.generate_privapp_xml(pkg, privapp_perms)
+                        with open(os.path.join(etc_perms, "privapp-permissions-wsa-installer.xml"), "w", newline="") as f:
+                            f.write(xml)
+                    if runtime_perms:
+                        etc_def = os.path.join(extract_dir, "system", "etc", "default-permissions")
+                        os.makedirs(etc_def, exist_ok=True)
+                        xml = InitrdManager.generate_default_xml(pkg, runtime_perms, fixed_perms)
+                        with open(os.path.join(etc_def, "default-permissions-wsa-installer.xml"), "w", newline="") as f:
+                            f.write(xml)
+
                     initrd.repack_lsp_image()
                     log(f"Added {pkg}")
                 else:
                     log("Failed to extract image, creating new")
-                    image_data = initrd.create_lsp_image([apk_path])
+                    image_data = initrd.create_lsp_image([apk_path], {pkg: profile})
                     arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
                     if CpioUtils.has_file(initrd.path, arcname):
                         CpioUtils.delete_file(initrd.path, arcname)
@@ -1699,7 +2492,7 @@ class WSATWRP:
                     log(f"Added {pkg}")
             else:
                 _debug("No lsp image, creating new")
-                image_data = initrd.create_lsp_image([apk_path])
+                image_data = initrd.create_lsp_image([apk_path], {pkg: profile})
                 arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
                 CpioUtils.add_file(initrd.path, arcname, image_data)
                 log(f"Added {pkg}")
@@ -1779,6 +2572,60 @@ class WSATWRP:
         else:
             print("Recovery system: PRESENT (no info.json)")
 
+        if initrd.has_lsp_image():
+            print()
+            print(f"System Apps ({LSP_IMAGE_NAME})")
+            print("-" * 50)
+            extract_dir = initrd.extract_lsp_image()
+            if extract_dir:
+                perm_dir = os.path.join(extract_dir, "permissions")
+                priv_app = os.path.join(extract_dir, "system", "priv-app")
+                apk_pkgs = []
+                if os.path.isdir(priv_app):
+                    for pkg_dir in sorted(os.listdir(priv_app)):
+                        pkg_path = os.path.join(priv_app, pkg_dir)
+                        if os.path.isdir(pkg_path):
+                            apk_files = [f for f in os.listdir(pkg_path) if f.endswith(".apk")]
+                            if apk_files:
+                                apk_pkgs.append(pkg_dir)
+                profiles = {}
+                if os.path.isdir(perm_dir):
+                    for jf in os.listdir(perm_dir):
+                        if jf.endswith(".json"):
+                            pkg_name = jf[:-5]
+                            try:
+                                with open(os.path.join(perm_dir, jf)) as f:
+                                    profiles[pkg_name] = json.load(f)
+                            except Exception:
+                                pass
+                if not apk_pkgs:
+                    print("  (no system apps installed)")
+                else:
+                    for pkg in apk_pkgs:
+                        profile = profiles.get(pkg, {})
+                        hide_u = profile.get("hide_uninstall", True)
+                        hide_d = profile.get("hide_disable", True)
+                        privapp = profile.get("privapp_perms", [])
+                        runtime = profile.get("runtime_perms", [])
+                        print(f"  {pkg}")
+                        print(f"    Uninstall: {'hidden' if hide_u else 'visible'}")
+                        print(f"    Disable: {'hidden' if hide_d else 'visible'}")
+                        print(f"    Privileged: {len(privapp)} permissions")
+                        if privapp:
+                            for p in privapp:
+                                print(f"      - {p}")
+                        print(f"    Runtime: {len(runtime)} permissions")
+                        if runtime:
+                            for p in runtime:
+                                print(f"      - {p}")
+                        print()
+                shutil.rmtree(LSP_TEMP, ignore_errors=True)
+            else:
+                print("  Failed to extract image")
+        else:
+            print()
+            print(f"System Apps ({LSP_IMAGE_NAME}): NOT PRESENT")
+
 
 def _parse_into(args_list):
     if args_list is None:
@@ -1829,6 +2676,8 @@ Examples:
                         help="Extract 7z + patch.json: --inject SEVENZ [into DEST]")
     parser.add_argument("--install-as-system-app", nargs='+', default=None,
                         help="Install APK(s) as system app: --install-as-system-app APK1 [APK2 ...]")
+    parser.add_argument("--update-as-system-app", nargs='+', default=None,
+                        help="Update/reinstall APK(s) as system app (overrides existing)")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug output")
     args = parser.parse_args()
@@ -1866,6 +2715,16 @@ Examples:
         twrp.install_as_system_app(
             apk_paths=args.install_as_system_app,
             target_initrd=args.path,
+        )
+        return
+
+    if args.update_as_system_app is not None:
+        _debug("Command: --update-as-system-app")
+        twrp = WSATWRP()
+        twrp.install_as_system_app(
+            apk_paths=args.update_as_system_app,
+            target_initrd=args.path,
+            force_update=True,
         )
         return
 

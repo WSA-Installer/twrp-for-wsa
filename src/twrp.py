@@ -878,6 +878,9 @@ class InitrdManager:
                 f.write(module_prop)
             post_fs_data = (
                 "#!/bin/sh\n"
+                "LOGFILE=\"$(dirname \"$0\")/post-fs-data.log\"\n"
+                "log() { echo \"[$(date '+%Y-%m-%d %H:%M:%S')] $1\" | tee -a \"$LOGFILE\"; }\n"
+                "log \"=== post-fs-data.sh start ===\"\n"
                 'BASE="$(dirname "$0")"\n'
                 "NVBASE=/data/adb\n"
                 'MOD_UPDATE_DIRNAME=modules_update\n'
@@ -888,62 +891,110 @@ class InitrdManager:
                 'MODID=$(grep_prop id "$BASE"/module.prop)\n'
                 'MOD_UPDATE_PATH=$MODULE_UPDATE_ROOT/$MODID\n'
                 'MOD_PATH=$NVBASE/modules/$MODID\n'
+                "log \"MODID=$MODID\"\n"
+                "log \"BASE=$BASE\"\n"
+                "log \"MOD_PATH=$MOD_PATH\"\n"
+                "log \"MOD_UPDATE_PATH=$MOD_UPDATE_PATH\"\n"
                 'mkdir -p -m 0755 "$MOD_PATH"\n'
                 'chcon u:object_r:system_file:s0 "$MOD_PATH"\n'
+                "log \"Created MOD_PATH\"\n"
                 'cp -dr --preserve=all "$BASE/module.prop" "$MOD_PATH"\n'
                 'chown root:root "$MOD_PATH/module.prop"\n'
                 'chmod 644 "$MOD_PATH/module.prop"\n'
                 'touch "$MOD_PATH/update"\n'
+                "log \"Copied module.prop to MOD_PATH\"\n"
                 'mkdir -p -m 0755 "$MOD_UPDATE_PATH"\n'
                 'chcon u:object_r:system_file:s0 "$MOD_UPDATE_PATH"\n'
                 'cp -dr --preserve=all "$BASE/module.prop" "$MOD_UPDATE_PATH"\n'
                 'chown root:root "$MOD_UPDATE_PATH/module.prop"\n'
                 'chmod 644 "$MOD_UPDATE_PATH/module.prop"\n'
+                "log \"Copied module.prop to MOD_UPDATE_PATH\"\n"
                 'cp -dr --preserve=all "$BASE/system" "$MOD_UPDATE_PATH"\n'
                 'find "$MOD_UPDATE_PATH/system" -type d -exec chmod 755 {} +\n'
                 'find "$MOD_UPDATE_PATH/system" -type f -exec chmod 644 {} +\n'
                 'find "$MOD_UPDATE_PATH/system" -type f -exec chown root:root {} +\n'
+                "log \"Copied system/ to MOD_UPDATE_PATH\"\n"
                 'if [ -f "$BASE/service.sh" ]; then\n'
                 '    cp -dr --preserve=all "$BASE/service.sh" "$MOD_UPDATE_PATH"\n'
                 '    chown root:root "$MOD_UPDATE_PATH/service.sh"\n'
                 '    chmod 755 "$MOD_UPDATE_PATH/service.sh"\n'
+                "    log \"Copied service.sh to MOD_UPDATE_PATH\"\n"
                 'fi\n'
                 'if [ -d "$BASE/permissions" ]; then\n'
                 '    cp -dr --preserve=all "$BASE/permissions" "$MOD_UPDATE_PATH"\n'
                 '    find "$MOD_UPDATE_PATH/permissions" -type f -exec chmod 644 {} +\n'
                 '    find "$MOD_UPDATE_PATH/permissions" -type f -exec chown root:root {} +\n'
+                "    log \"Copied permissions/ to MOD_UPDATE_PATH\"\n"
                 'fi\n'
+                "log \"=== post-fs-data.sh end ===\"\n"
             )
             with open(os.path.join(LSP_TEMP, "post-fs-data.sh"), "w", newline="") as f:
                 f.write(post_fs_data)
+            _debug("  Injected post-fs-data.sh with logging")
 
             service_sh = (
                 "#!/system/bin/sh\n"
+                "LOGFILE=\"$(dirname \"$0\")/service.log\"\n"
+                "log() { echo \"[$(date '+%Y-%m-%d %H:%M:%S')] $1\" | tee -a \"$LOGFILE\"; }\n"
+                "log \"=== service.sh start ===\"\n"
                 "MODDIR=${0%/*}\n"
                 "PERM_DIR=\"$MODDIR/permissions\"\n"
+                "log \"MODDIR=$MODDIR\"\n"
+                "log \"PERM_DIR=$PERM_DIR\"\n"
                 "\n"
                 "while [ \"$(getprop sys.boot_completed)\" != \"1\" ]; do sleep 1; done\n"
                 "sleep 3\n"
+                "log \"Boot completed, processing profiles...\"\n"
                 "\n"
+                "COUNT=0\n"
+                "GRANTED=0\n"
+                "ENABLED=0\n"
                 "for profile in \"$PERM_DIR\"/*.json; do\n"
                 "    [ -f \"$profile\" ] || continue\n"
                 "    PKG=$(basename \"$profile\" .json)\n"
+                "    COUNT=$((COUNT + 1))\n"
+                "    log \"--- Processing: $PKG ---\"\n"
                 "\n"
-                "    pm list packages 2>/dev/null | grep -q \"package:$PKG\" || continue\n"
+                "    if ! pm list packages 2>/dev/null | grep -q \"package:$PKG\"; then\n"
+                "        log \"SKIP: $PKG not installed\"\n"
+                "        continue\n"
+                "    fi\n"
+                "    log \"FOUND: $PKG is installed\"\n"
                 "\n"
+                "    log \"Granting runtime permissions...\"\n"
                 "    grep -o '\"android\\.[^\"]*\"' \"$profile\" | tr -d '\"' | while read perm; do\n"
-                "        pm grant \"$PKG\" \"$perm\" 2>/dev/null\n"
+                "        if pm grant \"$PKG\" \"$perm\" 2>/dev/null; then\n"
+                "            log \"  GRANTED: $perm\"\n"
+                "        else\n"
+                "            log \"  SKIP: $perm (already granted or not applicable)\"\n"
+                "        fi\n"
+                "        GRANTED=$((GRANTED + 1))\n"
                 "    done\n"
                 "\n"
                 "    if grep -q '\"hide_disable\": *true' \"$profile\"; then\n"
-                "        pm enable \"$PKG\" 2>/dev/null\n"
+                "        if pm enable \"$PKG\" 2>/dev/null; then\n"
+                "            log \"ENABLED: $PKG\"\n"
+                "            ENABLED=$((ENABLED + 1))\n"
+                "        else\n"
+                "            log \"ENABLE SKIP: $PKG (already enabled)\"\n"
+                "        fi\n"
                 "    fi\n"
                 "\n"
-                "    magisk resetprop -n \"persist.sys.priapp.$PKG\" \"1\" 2>/dev/null\n"
+                "    if magisk resetprop -n \"persist.sys.priapp.$PKG\" \"1\" 2>/dev/null; then\n"
+                "        log \"RESETPROP: persist.sys.priapp.$PKG=1\"\n"
+                "    else\n"
+                "        log \"RESETPROP SKIP: $PKG (magisk not available)\"\n"
+                "    fi\n"
+                "\n"
+                "    log \"--- Done: $PKG ---\"\n"
                 "done\n"
+                "\n"
+                "log \"Summary: profiles=$COUNT granted=$GRANTED enabled=$ENABLED\"\n"
+                "log \"=== service.sh end ===\"\n"
             )
             with open(os.path.join(LSP_TEMP, "service.sh"), "w", newline="") as f:
                 f.write(service_sh)
+            _debug("  Injected service.sh with logging")
 
             all_privapp = []
             all_runtime = []
@@ -2424,45 +2475,83 @@ class WSATWRP:
                 _debug("Extracting existing image")
                 extract_dir = initrd.extract_lsp_image()
                 if extract_dir:
+                    _debug(f"  extract_dir: {extract_dir}")
                     priv_app = os.path.join(extract_dir, "system", "priv-app")
                     os.makedirs(os.path.join(priv_app, pkg), exist_ok=True)
                     shutil.copy2(apk_path, os.path.join(priv_app, pkg, os.path.basename(apk_path)))
-                    _debug(f"Added: system/priv-app/{pkg}/{os.path.basename(apk_path)}")
+                    _debug(f"  Added: system/priv-app/{pkg}/{os.path.basename(apk_path)}")
 
                     perm_dir = os.path.join(extract_dir, "permissions")
                     os.makedirs(perm_dir, exist_ok=True)
                     with open(os.path.join(perm_dir, f"{pkg}.json"), "w", newline="") as f:
                         json.dump(profile, f, indent=2)
+                    _debug(f"  Saved profile: permissions/{pkg}.json")
 
                     svc_path = os.path.join(extract_dir, "service.sh")
                     if not os.path.exists(svc_path):
                         svc_content = (
                             "#!/system/bin/sh\n"
+                            "LOGFILE=\"$(dirname \"$0\")/service.log\"\n"
+                            "log() { echo \"[$(date '+%Y-%m-%d %H:%M:%S')] $1\" | tee -a \"$LOGFILE\"; }\n"
+                            "log \"=== service.sh start ===\"\n"
                             "MODDIR=${0%/*}\n"
                             "PERM_DIR=\"$MODDIR/permissions\"\n"
+                            "log \"MODDIR=$MODDIR\"\n"
+                            "log \"PERM_DIR=$PERM_DIR\"\n"
                             "\n"
                             "while [ \"$(getprop sys.boot_completed)\" != \"1\" ]; do sleep 1; done\n"
                             "sleep 3\n"
+                            "log \"Boot completed, processing profiles...\"\n"
                             "\n"
+                            "COUNT=0\n"
+                            "GRANTED=0\n"
+                            "ENABLED=0\n"
                             "for profile in \"$PERM_DIR\"/*.json; do\n"
                             "    [ -f \"$profile\" ] || continue\n"
                             "    PKG=$(basename \"$profile\" .json)\n"
+                            "    COUNT=$((COUNT + 1))\n"
+                            "    log \"--- Processing: $PKG ---\"\n"
                             "\n"
-                            "    pm list packages 2>/dev/null | grep -q \"package:$PKG\" || continue\n"
+                            "    if ! pm list packages 2>/dev/null | grep -q \"package:$PKG\"; then\n"
+                            "        log \"SKIP: $PKG not installed\"\n"
+                            "        continue\n"
+                            "    fi\n"
+                            "    log \"FOUND: $PKG is installed\"\n"
                             "\n"
+                            "    log \"Granting runtime permissions...\"\n"
                             "    grep -o '\"android\\.[^\"]*\"' \"$profile\" | tr -d '\"' | while read perm; do\n"
-                            "        pm grant \"$PKG\" \"$perm\" 2>/dev/null\n"
+                            "        if pm grant \"$PKG\" \"$perm\" 2>/dev/null; then\n"
+                            "            log \"  GRANTED: $perm\"\n"
+                            "        else\n"
+                            "            log \"  SKIP: $perm (already granted or not applicable)\"\n"
+                            "        fi\n"
+                            "        GRANTED=$((GRANTED + 1))\n"
                             "    done\n"
                             "\n"
                             "    if grep -q '\"hide_disable\": *true' \"$profile\"; then\n"
-                            "        pm enable \"$PKG\" 2>/dev/null\n"
+                            "        if pm enable \"$PKG\" 2>/dev/null; then\n"
+                            "            log \"ENABLED: $PKG\"\n"
+                            "            ENABLED=$((ENABLED + 1))\n"
+                            "        else\n"
+                            "            log \"ENABLE SKIP: $PKG (already enabled)\"\n"
+                            "        fi\n"
                             "    fi\n"
                             "\n"
-                            "    magisk resetprop -n \"persist.sys.priapp.$PKG\" \"1\" 2>/dev/null\n"
+                            "    if magisk resetprop -n \"persist.sys.priapp.$PKG\" \"1\" 2>/dev/null; then\n"
+                            "        log \"RESETPROP: persist.sys.priapp.$PKG=1\"\n"
+                            "    else\n"
+                            "        log \"RESETPROP SKIP: $PKG (magisk not available)\"\n"
+                            "    fi\n"
+                            "\n"
+                            "    log \"--- Done: $PKG ---\"\n"
                             "done\n"
+                            "\n"
+                            "log \"Summary: profiles=$COUNT granted=$GRANTED enabled=$ENABLED\"\n"
+                            "log \"=== service.sh end ===\"\n"
                         )
                         with open(svc_path, "w", newline="") as f:
                             f.write(svc_content)
+                        _debug(f"  Injected service.sh to EROFS")
 
                     privapp_perms = profile.get("privapp_perms", [])
                     runtime_perms = profile.get("runtime_perms", [])
@@ -2473,28 +2562,34 @@ class WSATWRP:
                         xml = InitrdManager.generate_privapp_xml(pkg, privapp_perms)
                         with open(os.path.join(etc_perms, "privapp-permissions-wsa-installer.xml"), "w", newline="") as f:
                             f.write(xml)
+                        _debug(f"  Generated privapp-permissions-wsa-installer.xml ({len(privapp_perms)} perms)")
                     if runtime_perms:
                         etc_def = os.path.join(extract_dir, "system", "etc", "default-permissions")
                         os.makedirs(etc_def, exist_ok=True)
                         xml = InitrdManager.generate_default_xml(pkg, runtime_perms, fixed_perms)
                         with open(os.path.join(etc_def, "default-permissions-wsa-installer.xml"), "w", newline="") as f:
                             f.write(xml)
+                        _debug(f"  Generated default-permissions-wsa-installer.xml ({len(runtime_perms)} perms)")
 
+                    _debug("  Repacking EROFS image")
                     initrd.repack_lsp_image()
                     log(f"Added {pkg}")
                 else:
                     log("Failed to extract image, creating new")
+                    _debug("  Creating new LSP image from scratch")
                     image_data = initrd.create_lsp_image([apk_path], {pkg: profile})
                     arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
                     if CpioUtils.has_file(initrd.path, arcname):
                         CpioUtils.delete_file(initrd.path, arcname)
                     CpioUtils.add_file(initrd.path, arcname, image_data)
+                    _debug(f"  add_file({arcname}, {len(image_data):,} bytes)")
                     log(f"Added {pkg}")
             else:
                 _debug("No lsp image, creating new")
                 image_data = initrd.create_lsp_image([apk_path], {pkg: profile})
                 arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
                 CpioUtils.add_file(initrd.path, arcname, image_data)
+                _debug(f"  add_file({arcname}, {len(image_data):,} bytes)")
                 log(f"Added {pkg}")
             time.sleep(0.5)
 
