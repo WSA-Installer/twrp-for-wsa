@@ -66,6 +66,8 @@ ADB_HOST = "127.0.0.1"
 ADB_DEVICE = f"{ADB_HOST}:{ADB_PORT}"
 CREATE_NO_WINDOW = 0x08000000
 DEBUG = False
+TWRP_REQUIRED_FILES = ("/sbin/twrp", "/sbin/busybox", "/sbin/linker64", "/info.json")
+TWRP_REQUIRED_DIRS = ("/twres", "/etc", "/system/lib64")
 
 PRIVILEGED_PERMS = {
     "android.permission.WRITE_SECURE_SETTINGS", "android.permission.READ_LOGS",
@@ -543,6 +545,20 @@ class InitrdManager:
         _debug(f"is_stock() -> {result}")
         return result
 
+    def twrp_missing(self):
+        """Required TWRP paths absent from the image (empty list = complete)."""
+        entries = {name for name, *_ in CpioUtils.scan_entries(self.path)}
+        missing = []
+        for path in TWRP_REQUIRED_FILES:
+            if path.strip("/") not in entries:
+                missing.append(path)
+        for path in TWRP_REQUIRED_DIRS:
+            key = path.strip("/") + "/"
+            if not any(name.startswith(key) for name in entries):
+                missing.append(key)
+        _debug(f"twrp_missing() -> {missing}")
+        return missing
+
     def is_twrp_supported(self):
         info = self.read_info()
         if info is None:
@@ -550,9 +566,10 @@ class InitrdManager:
         else:
             raw = info.get("twrp_support", "false")
             if isinstance(raw, str):
-                result = raw.strip().lower() == "true"
+                flag = raw.strip().lower() == "true"
             else:
-                result = bool(raw)
+                flag = bool(raw)
+            result = flag and not self.twrp_missing()
         _debug(f"is_twrp_supported() -> {result}")
         return result
 
@@ -608,16 +625,6 @@ class InitrdManager:
         with open(src_path, "rb") as f:
             data = f.read()
         existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
-        basename = os.path.basename(src_path)
-        if basename == "init" and "init" in existing and "init_orig" not in existing:
-            _log(f"Renaming /init -> /init_orig")
-            for name, ds, sz, hp in CpioUtils.scan_entries(self.path):
-                if name == "/init" or name == "init":
-                    orig_data = CpioUtils.read_file(self.path, name)
-                    if orig_data:
-                        CpioUtils.add_file(self.path, "/init_orig", orig_data)
-                        _log(f"  Saved /init_orig ({len(orig_data):,} bytes)")
-                    break
         if arcname in existing:
             _debug(f"  Replacing existing: {arcname}")
             CpioUtils.delete_file(self.path, arcname)
@@ -637,16 +644,6 @@ class InitrdManager:
                     data = f.read()
                 entries_to_add.append((arcname, data, 0o100644))
         existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
-        has_init = any(a.split("/")[-1] == "init" for a, _, _ in entries_to_add)
-        if has_init and "init" in existing and "init_orig" not in existing:
-            _log(f"Renaming /init -> /init_orig")
-            for name, ds, sz, hp in CpioUtils.scan_entries(self.path):
-                if name == "/init" or name == "init":
-                    orig_data = CpioUtils.read_file(self.path, name)
-                    if orig_data:
-                        CpioUtils.add_file(self.path, "/init_orig", orig_data)
-                        _log(f"  Saved /init_orig ({len(orig_data):,} bytes)")
-                    break
         new_entries = []
         for arcname, data, mode in entries_to_add:
             if arcname in existing:
@@ -690,27 +687,6 @@ class InitrdManager:
                     patch = json.load(f)
 
                 existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
-
-                for item in patch:
-                    if "rename" in item:
-                        orig_name = item.get("original-name", "").strip("/")
-                        rename_to = item["rename"].strip("/")
-                        if not orig_name:
-                            _debug(f"  SKIP rename: missing original-name")
-                            continue
-                        if rename_to in existing:
-                            _log(f"/{rename_to} already exists, skip rename")
-                        elif orig_name not in existing:
-                            _debug(f"  SKIP rename: /{orig_name} not found in cpio")
-                        else:
-                            _log(f"Renaming /{orig_name} -> /{rename_to}")
-                            for name, ds, sz, hp in CpioUtils.scan_entries(self.path):
-                                if name == f"/{orig_name}" or name == orig_name:
-                                    orig_data = CpioUtils.read_file(self.path, name)
-                                    if orig_data:
-                                        CpioUtils.add_file(self.path, f"/{rename_to}", orig_data)
-                                        _log(f"  Saved /{rename_to} ({len(orig_data):,} bytes)")
-                                    break
 
                 pick_items = [item for item in patch if "pick" in item]
                 _log(f"Injecting {len(pick_items)} entries")
@@ -1960,6 +1936,9 @@ class WSATWRP:
         if not has_twrp:
             _debug("  Branch: FIRST_TIME_INSTALL")
             # First time install
+            missing = initrd.twrp_missing()
+            if missing:
+                log(f"TWRP files missing: {', '.join(missing)}")
             log("Installing TWRP...")
             time.sleep(0.5)
 
@@ -1970,6 +1949,15 @@ class WSATWRP:
             else:
                 _debug("  Skipping WSA kill (not WSA img)")
                 log("Patching file directly...")
+
+            log("Checking Magisk hook...")
+            if not initrd.add_hook_infrastructure():
+                log("Magisk hook install failed!")
+                time.sleep(2)
+                window.request_close()
+                return
+            log("Magisk hook ready")
+            time.sleep(0.5)
 
             if inject_file:
                 log(f"Injecting file: {os.path.basename(inject_file)} -> {inject_dest}")

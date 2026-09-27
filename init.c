@@ -18,15 +18,14 @@
  *     /overlay.d/sbin/* — GApps/Magisk images
  *
  * After TWRP injection:
- *     /init       — THIS dispatcher (replaces original)
- *     /init_orig  — original /init (symlink target or ELF)
+ *     /init       — THIS dispatcher (original is never renamed)
  *     /sbin/twrp  — TWRP recovery binary
  *     /info.json  — metadata with recovery_flag
  *
  * Boot chain:
  *   Kernel -> /init (this dispatcher)
  *     -> recovery_flag true  -> exec /sbin/twrp (recovery)
- *     -> recovery_flag false -> exec /init_orig (normal Android)
+ *     -> recovery_flag false -> exec /lspinit if present, else /wsainit
  *
  * Debug log:
  *   Written to /tmp/twrp_debug.log (ramdisk)
@@ -41,7 +40,8 @@
 
 #define INFO_JSON       "/info.json"
 #define TWRP_BIN        "/sbin/twrp"
-#define INIT_ORIG       "/init_orig"
+#define LSPINIT         "/lspinit"
+#define WSAINIT         "/wsainit"
 #define LOG_RAMDISK     "/tmp/twrp_debug.log"
 #define LOG_WIN_TEMP    "/mnt/c/Windows/Temp/twrp_debug.log"
 
@@ -126,31 +126,39 @@ int main(void) {
     char buf[1024];
     int n = read_file(INFO_JSON, buf, sizeof(buf));
 
-    if (n < 0) {
-        log_msg("ERROR: /info.json not found or empty");
-        log_msg("Falling back to /init_orig");
-        log_close();
-        execl(INIT_ORIG, "init_orig", NULL);
-        return 1;
-    }
+    if (n > 0) {
+        log_hex_path(INFO_JSON, buf, n);
+        log_msg("  Checking recovery_flag...");
 
-    log_hex_path(INFO_JSON, buf, n);
-    log_msg("  Checking recovery_flag...");
-
-    if (cistrstr(buf, "\"recovery_flag\": \"true\"")) {
-        log_msg("  recovery_flag = true");
-        log_msg("  Launching /sbin/twrp");
-        log_close();
-        execl(TWRP_BIN, "twrp", NULL);
-        log_msg("ERROR: exec /sbin/twrp FAILED");
+        if (cistrstr(buf, "\"recovery_flag\": \"true\"")) {
+            log_msg("  recovery_flag = true");
+            log_msg("  Launching /sbin/twrp");
+            log_close();
+            execl(TWRP_BIN, "twrp", NULL);
+            log_msg("ERROR: exec /sbin/twrp FAILED");
+        } else {
+            log_msg("  recovery_flag = false or missing");
+        }
     } else {
-        log_msg("  recovery_flag = false or missing");
-        log_msg("  Falling back to /init_orig");
-        log_close();
-        execl(INIT_ORIG, "init_orig", NULL);
+        log_msg("ERROR: /info.json not found or empty");
+        log_msg("  Normal boot");
     }
 
-    log_msg("ERROR: exec failed, nothing to run");
+    if (access(LSPINIT, X_OK) == 0) {
+        log_msg("  Found /lspinit -> exec");
+        log_close();
+        execl(LSPINIT, "lspinit", NULL);
+        log_msg("ERROR: exec /lspinit FAILED");
+    }
+
+    if (access(WSAINIT, X_OK) == 0) {
+        log_msg("  Found /wsainit -> exec");
+        log_close();
+        execl(WSAINIT, "wsainit", NULL);
+        log_msg("ERROR: exec /wsainit FAILED");
+    }
+
+    log_msg("ERROR: neither /lspinit nor /wsainit found");
     log_close();
     return 1;
 }
