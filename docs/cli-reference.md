@@ -387,6 +387,13 @@ twrp.exe --admin --user                              # usage error, exit 2
 The two flags are **mutually exclusive**. Default for install/update is
 `--user`. `--status` always reports both images.
 
+Each image also carries its own `module.prop` `name` and a one-line
+`description` (from `IMAGE_SPECS["admin"|"user"]["description"]`) that states
+what the module is for — see
+[Admin & User Modules](admin-user-modules.md). It is written when the image is
+created (`create_lsp_image()`), so an already-existing image keeps its old text
+until it is re-created.
+
 **Password handling** (only for `--admin`): SHA-256 comparison, up to 3
 attempts, non-interactive override via the `WSA_ADMIN_PASSWORD` environment
 variable. See [Admin & User Modules](admin-user-modules.md).

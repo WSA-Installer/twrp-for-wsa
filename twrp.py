@@ -112,6 +112,14 @@ IMAGE_SPECS = {
         "priv_xml": "privapp-permissions-wsa-installer.xml",
         "def_xml": "default-permissions-wsa-installer.xml",
         "label": "admin",
+        "description": (
+            "WSA Installer - admin module: system apps and boot hook for WSA. "
+            "Reason: the admin installs this TWRP module into the WSA image so the "
+            "preinstalled system apps (bloatware) that power native Windows-Android "
+            "integration - Termux shell, WebDAV share, CLI bridge - plus the boot "
+            "hook that applies scheduled changes, are always part of the system "
+            "image; access is protected by the --admin password."
+        ),
     },
     "user": {
         "image": LSP_IMAGE_NAME_USER,
@@ -121,6 +129,13 @@ IMAGE_SPECS = {
         "priv_xml": "privapp-permissions-wsa-installer-user.xml",
         "def_xml": "default-permissions-wsa-installer-user.xml",
         "label": "user",
+        "description": (
+            "WSA Installer (User) - user system apps for WSA. Reason: the same TWRP "
+            "module system, but built and installed by the user for the system apps "
+            "they choose to add as system apps; it lives in a separate image so "
+            "those apps can be installed, updated or removed without touching the "
+            "admin module and without any password."
+        ),
     },
 }
 
@@ -130,6 +145,7 @@ LSP_MOD_NAME = IMAGE_SPECS["admin"]["mod_name"]
 LSP_PRIV_XML = IMAGE_SPECS["admin"]["priv_xml"]
 LSP_DEF_XML = IMAGE_SPECS["admin"]["def_xml"]
 LSP_LABEL = IMAGE_SPECS["admin"]["label"]
+LSP_MOD_DESC = IMAGE_SPECS["admin"]["description"]
 
 
 def image_spec(mode):
@@ -145,15 +161,16 @@ def select_image(mode):
     Every LSP helper (has/extract/repack/find/create) reads those globals,
     so this one call is the single switch between admin and user module."""
     global LSP_IMAGE_NAME, LSP_TEMP, LSP_MOD_ID, LSP_MOD_NAME
-    global LSP_PRIV_XML, LSP_DEF_XML, LSP_LABEL
+    global LSP_PRIV_XML, LSP_DEF_XML, LSP_LABEL, LSP_MOD_DESC
     spec = image_spec(mode)
     LSP_IMAGE_NAME = spec["image"]
-    LSP_TEMP = os.path.join(INJECT_TEMP, spec["temp"])
+    LSP_TEMP = spec["temp"]
     LSP_MOD_ID = spec["mod_id"]
     LSP_MOD_NAME = spec["mod_name"]
     LSP_PRIV_XML = spec["priv_xml"]
     LSP_DEF_XML = spec["def_xml"]
     LSP_LABEL = spec["label"]
+    LSP_MOD_DESC = spec["description"]
     return spec
 
 
@@ -1791,7 +1808,7 @@ class InitrdManager:
                 "version=v1.0\n"
                 "versionCode=1\n"
                 "author=MR CYBER\n"
-                "description=WSA Installer :- A Windows Subsystem for Android (WSA) integration project focused on improving the Android-side experience inside WSA and making Android services, files, and command-line tools work more naturally with the Windows host. GitHub :- https://github.com/WSA-Installer/wsa-installer Website :- https://wsa-installer-website.vercel.app/ Channel :- https://www.youtube.com/@AT_Tech_Zone Reason Of Bloatware :- To integrate the Android environment more deeply with Windows and make WSA feel less like an isolated Android container. Some additional components are intentionally included because they provide Windows <-> Android integration that WSA does not provide by default. Example Of Termux :- Termux provides a WSL-like environment inside the Android side of WSA. Through WSA integration, users can access a Termux shell from Windows Terminal. Target User :- Who wants a WSL-like experience without installing WSL or wants to use WSA as another Linux distribution. Command : wsa --help like wsl --help Example Of WebDAV :- WebDAV runs as an Android-side file server inside WSA. It provides a bridge between the Android filesystem and Windows, allowing Android storage to be exposed to Windows and mounted as a Windows drive. Target User :- Who wants to access and manage Android files and folders from the Windows host as a drive or use \\\\wsa.localhost{Type-Share}{path} like \\\\wsl.localhost{distro-name}{path}. Command :- net use A: \\\\wsa.localhost{Type-Share}{path} net use L: \\\\wsl.localhost{distro-name}{path} Overall Purpose :- The goal is not only to install Android applications on Windows, but to build a more complete Windows <-> Android integration layer where Android files, shells, services, and tools can be accessed and controlled more naturally from the Windows host.\n"
+                f"description={LSP_MOD_DESC}\n"
             )
             with open(os.path.join(LSP_TEMP, "module.prop"), "w", newline="") as f:
                 f.write(module_prop)

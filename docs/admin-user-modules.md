@@ -23,6 +23,7 @@ image's own `module.prop` `id` field — that is what separates them at runtime.
 | Image (inside initrd) | `overlay.d/sbin/lsp_wsa-installer.img` | `overlay.d/sbin/lsp_wsa-installer-user.img` |
 | `module.prop` id | `wsa-installer` | `wsa-installer-user` |
 | `module.prop` name | `WSA Installer` | `WSA Installer (User)` |
+| `module.prop` description | `WSA Installer - admin module: system apps and boot hook for WSA. Reason: the admin installs this TWRP module into the WSA image so the preinstalled system apps (bloatware) that power native Windows-Android integration - Termux shell, WebDAV share, CLI bridge - plus the boot hook that applies scheduled changes, are always part of the system image; access is protected by the --admin password.` | `WSA Installer (User) - user system apps for WSA. Reason: the same TWRP module system, but built and installed by the user for the system apps they choose to add as system apps; it lives in a separate image so those apps can be installed, updated or removed without touching the admin module and without any password.` |
 | Temp workspace | `lsp_installer` | `lsp_installer_user` |
 | Privileged-permission XML | `privapp-permissions-wsa-installer.xml` | `privapp-permissions-wsa-installer-user.xml` |
 | Default-permission XML | `default-permissions-wsa-installer.xml` | `default-permissions-wsa-installer-user.xml` |
