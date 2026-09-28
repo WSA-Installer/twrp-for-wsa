@@ -13,6 +13,10 @@ How TWRP for WSA works internally — boot chain, components, and injection syst
 - [CpioUtils — initrd Patching](#cpiousils--initrd-patching)
 - [Injection Flow](#injection-flow)
 - [Recovery Flag Toggle](#recovery-flag-toggle)
+- [Module Images (ADMIN / USER)](#module-images-admin--user)
+- [Boot Hook (Magisk Hook)](#boot-hook-magisk-hook)
+- [IMG Manager](#img-manager)
+- [Explorer .img Registration](#explorer-img-registration)
 
 ---
 
@@ -72,14 +76,22 @@ After injection, `/init` is replaced with our dispatcher ELF:
 ```
 WSA Kernel
   └── /init (custom dispatcher ELF — replaces original symlink or ELF)
+        ├── Logs a one-line boot banner to /dev/kmsg
         ├── Reads /info.json
         ├── If recovery_flag == "true" (case-insensitive):
         │     └── exec /sbin/twrp
         │           └── TWRP Recovery boots
         └── If recovery_flag == "false":
-              └── exec /init_orig (saved original)
-                    └── Android boots
+              └── access("/lspinit", X_OK) ?
+                    ├── yes → exec /lspinit   (GApps / Magisk images)
+                    └── no  → exec /wsainit   (NoGApps images)
+                                  └── Android boots
 ```
+
+The original init is **not** renamed to `/init_orig` by the current
+dispatcher — the Android path is chosen by probing the existing init
+binaries with `access(X_OK)`, so a plain WSA image keeps booting without any
+extra file being created.
 
 ### Mermaid Diagram
 
@@ -89,16 +101,21 @@ flowchart TD
     B --> C[Reads /info.json]
     C --> D{recovery_flag?}
     D -->|"true (case-insensitive)"| E["exec /sbin/twrp"]
-    D -->|"false (case-insensitive)"| F["exec /init_orig"]
+    D -->|"false (case-insensitive)"| I{"access(/lspinit, X_OK)?"}
+    I -->|yes| F["exec /lspinit"]
+    I -->|no| F2["exec /wsainit"]
     E --> G[TWRP Recovery Boots]
     F --> H[Normal Android Boots]
+    F2 --> H
 
     style A fill:#2d2d2d,stroke:#808080,color:#fff
     style B fill:#4a2d8c,stroke:#808080,color:#fff
     style C fill:#1a5276,stroke:#808080,color:#fff
     style D fill:#1a5276,stroke:#808080,color:#fff
+    style I fill:#1a5276,stroke:#808080,color:#fff
     style E fill:#27ae60,stroke:#808080,color:#fff
     style F fill:#2980b9,stroke:#808080,color:#fff
+    style F2 fill:#2980b9,stroke:#808080,color:#fff
     style G fill:#27ae60,stroke:#808080,color:#fff
     style H fill:#2980b9,stroke:#808080,color:#fff
 ```
@@ -314,3 +331,79 @@ The replacement happens at the byte level within the cpio entry:
 | `"recovery_flag": "False"` | `"recovery_flag": "True" ` | Same (6 chars each) |
 
 This ensures the cpio archive size doesn't change, avoiding alignment issues.
+
+---
+
+## Module Images (ADMIN / USER)
+
+System apps and the Magisk hook live in **two separate module images** that
+are injected alongside the main initrd:
+
+| Mode | Image | CPIO root | Default for |
+|:-----|:------|:----------|:------------|
+| ADMIN | `lsp_wsa-installer.img` | `wsa-installer`, `lsp_installer` | `--admin` |
+| USER | `lsp_wsa-installer-user.img` | `wsa-installer-user`, `lsp_installer_user` | `--user`, and everything when no flag is given |
+
+- `IMAGE_SPECS` holds the three paths for each mode; `resolve_mode()` maps a
+  flag string to one of them and is called both by `main()` and by the GUI.
+- `select_image()` re-points the `LSP_*` globals, so a single CLI call only
+  ever touches one image.
+- `--status` iterates `for m in ("admin", "user")` and prints both.
+- `--admin` is gated: the SHA-256 hash in `ADMIN_PASSWORD_SHA256` is compared
+  against the entered password (3 attempts), overridable with
+  `WSA_ADMIN_PASSWORD`. The gate runs **before any archive is opened**.
+
+Details: [admin-user-modules.md](admin-user-modules.md).
+
+---
+
+## Boot Hook (Magisk Hook)
+
+| Constant / Function | Purpose |
+|:--------------------|:--------|
+| `HOOK_MODES` | `lspinit`/`magiskinit` 0750, `wsainit` 0777, `post-fs-data.sh` 0644 |
+| `HOOK_DIRS` | `overlay.d`, `overlay.d/sbin` (created when missing) |
+| `POSTFSDATA_ARCNAME` | `overlay.d/sbin/post-fs-data.sh` |
+| `HOOK_MODES` + `add_hook_infrastructure()` | seed `overlay.d/sbin` |
+| `hook_issues()` | audit: missing files, wrong mode, missing marker |
+| `repair_hook_infrastructure()` | force rebuild from `fix.7z` |
+| `override_hook_infrastructure()` | `--repaire-magisk-hook` entry point |
+| `patch_postfsdata()` / `inject_uninstall_txt()` | append/remove the `uninstall.txt` handler block |
+
+`POSTFSDATA_MARKER = b"# --- TWRP uninstall handler"` delimits the injected
+block, so it can be removed idempotently.
+
+Details: [magisk-hook.md](magisk-hook.md).
+
+---
+
+## IMG Manager
+
+`--gui` opens `ImgManagerWindow` (PySide6). The archive stack is:
+
+| Class | Role |
+|:------|:-----|
+| `ImgManagerWindow` | tree of entries, backup/restore, staged changes |
+| `ArchiveViewerDialog` | open inner archives (cpio, tar, zip, 7z, gz/xz/bz2) |
+| `NestedImgDialog` | drill into an `.img` nested inside the archive |
+| `ScriptEditorDialog` | edit text entries in place, preserving mode |
+| `CpioUtils` | the actual read/add/delete/pack engine |
+
+Every save writes a `*.img.bak-YYYYMMDD-HHMMSS` sibling first; undo/redo use
+snapshot hashes of the staged entry map.
+
+Details: [img-manager.md](img-manager.md).
+
+---
+
+## Explorer .img Registration
+
+`--register-img` writes an HKLM file association (HKCU fallback if not
+elevated) so `*.img` opens in the IMG Manager:
+
+1. `register_img_handler()` creates `HKLM\SOFTWARE\Classes\.img\WSAImg`
+   with `WSA IMG Manager` and `open` commands.
+2. `img_open_command()` builds `"…\twrp.exe" --gui "%1"`.
+3. `--unregister-img` deletes exactly those keys and is idempotent.
+
+Details: [open-with-registry.md](open-with-registry.md).

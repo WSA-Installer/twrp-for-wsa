@@ -8,14 +8,20 @@ Planned features and improvements for TWRP for WSA.
 
 ### v4.1.0 (Current)
 
-- Open-source CLI tool (`src/twrp.py`)
+- Open-source CLI tool (`twrp.py`)
 - TWRP injection via cpio patching
 - Recovery flag toggle (`--enable-twrp` / `--disable-twrp`)
 - Custom dispatcher ELF binary (init.c)
 - GitHub Actions automated build
 - Support for 7 WSA image variants
-- Case-insensitive recovery flag check
+- Case-insensitive recovery_flag check
 - info.json metadata system
+- ADMIN / USER module images with password-gated `--admin`
+- System-app install / update / list / uninstall (`boltware`)
+- Magisk hook install / repair
+- IMG Manager (`--gui`) with archive Edit/Pack and backups
+- `.img` Open-with registration (`--register-img`)
+- Compiled `prebuilt/init` + dispatcher-only CI workflow
 
 ---
 
@@ -25,9 +31,9 @@ Planned features and improvements for TWRP for WSA.
 
 - Automatic WSA version detection
 - Initrd.img compression support (gzip, lz4)
-- Backup creation before injection
 - Progress bar for injection operations
 - Verbose logging mode
+- `assets/twrp.7z` bundled payload for one-command injection
 
 ### v4.3.0
 

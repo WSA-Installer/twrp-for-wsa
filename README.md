@@ -18,7 +18,7 @@
 
 Part of the [WSA Installer](https://github.com/WSA-Installer) organization.
 
-[Download twrp.exe](https://github.com/WSA-Installer/twrp-for-wsa/releases/latest) · [Installation Guide](docs/installation.md) · [Commands](docs/commands.md) · [Architecture](docs/architecture.md) · [Source Code](src/twrp.py)
+[Download twrp.exe](https://github.com/WSA-Installer/twrp-for-wsa/releases/latest) · [Installation Guide](docs/installation.md) · [Commands](docs/commands.md) · [Architecture](docs/architecture.md) · [Source Code](twrp.py)
 
 </div>
 
@@ -94,9 +94,32 @@ The official WSA installation does not include any recovery mode. If something g
 | ADB Recovery Access | Connect via ADB port 58526 in recovery mode |
 | Multi-Image Support | 7 WSA variants: Windows x64, ARM64, Amazon Fire |
 | GitHub Actions Build | Automated TWRP compilation from source |
-| Status Check | `--status` shows current state of all components |
+| Status Check | `--status` shows all components **and both module images** |
 | Granular Injection | Inject individual files or folders with `into` keyword |
 | Safe Rollback | Restore original initrd.img at any time |
+
+### IMG Manager & Archive Editing
+
+| Feature | Description |
+|:--------|:------------|
+| IMG Manager GUI | `--gui` — 7-Zip-style browser for the `initrd.img` cpio archive |
+| Extract → Edit → Pack | Open inner archives (cpio, tar, zip, 7z, gz/xz/bz2), edit, repack |
+| Text Editor | Edit scripts in place with mode preservation |
+| Backups | Auto `*.img.bak-YYYYMMDD-HHMMSS` before every save, plus restore picker |
+| Undo / Redo | Snapshot history for staged changes |
+| Permission Fidelity | uid/gid, modes and symlinks restored on repack |
+| `.img` Open With | `--register-img` makes Explorer open `.img` in the IMG Manager |
+
+### System Apps, Modules & Hook
+
+| Feature | Description |
+|:--------|:------------|
+| Dual Module Images | ADMIN (`lsp_wsa-installer.img`) and USER (`lsp_wsa-installer-user.img`) coexist |
+| Password-Gated Admin | `--admin` needs a SHA-256 verified password (3 attempts, `WSA_ADMIN_PASSWORD` override) |
+| System-App Install/Update | `--install-as-system-app` / `--update-as-system-app` — default is the USER module |
+| Boltware Manager | `--list-of-boltware` / `--uninstall-boltware` across both images, de-duplicated |
+| Magisk Hook | `--install-magisk-hook` / `--repaire-magisk-hook` with a `hook_issues()` audit |
+| Scheduled Uninstall | Removals written to `uninstall.txt` and applied on next boot |
 
 ### TWRP Recovery Features
 
@@ -191,13 +214,22 @@ Restart WSA. Android boots normally.
 
 | Command | Description |
 |:--------|:------------|
-| `twrp.exe --status` | Check current WSA and TWRP status |
+| `twrp.exe --status` | Check current WSA and TWRP status + both module images |
 | `twrp.exe --inject twrp.7z` | Extract 7z and inject TWRP into initrd.img |
 | `twrp.exe --inject-file info.json` | Inject a single file into initrd.img |
 | `twrp.exe --inject-folder twrp_files/` | Inject a folder into initrd.img |
 | `twrp.exe --enable-twrp` | Set recovery flag to boot TWRP |
 | `twrp.exe --disable-twrp` | Clear recovery flag to boot Android |
 | `twrp.exe --inject twrp.7z --path D:\initrd.img` | Patch a specific initrd.img file |
+| `twrp.exe --gui` | Open the IMG Manager (archive browser/editor) |
+| `twrp.exe --install-as-system-app app.apk` | Install a system app into the USER module |
+| `twrp.exe --install-as-system-app app.apk --admin` | Install into the ADMIN module (password) |
+| `twrp.exe --update-as-system-app app.apk` | Overwrite an existing system app |
+| `twrp.exe --list-of-boltware` | List system apps in both module images |
+| `twrp.exe --uninstall-boltware com.example.app` | Schedule removal on next boot |
+| `twrp.exe --install-magisk-hook` | Install the boot hook only |
+| `twrp.exe --repaire-magisk-hook` | Force-rebuild the hook from `fix.7z` |
+| `twrp.exe --register-img` | Register `.img` → Open with → WSA IMG Manager |
 
 ### Examples
 
@@ -363,14 +395,12 @@ graph TB
 
 ## Source Code
 
-TWRP for WSA is fully open source. The main tool is `src/twrp.py`.
+TWRP for WSA is fully open source. The main tool is `twrp.py`.
 
 ### Project Structure
 
 ```
 twrp-for-wsa/
-├── src/
-│   └── twrp.py              # Main CLI tool (~1500 lines)
 ├── docs/
 │   ├── installation.md      # Installation guide
 │   ├── commands.md          # CLI reference
@@ -382,14 +412,33 @@ twrp-for-wsa/
 │   ├── variants.md          # WSA image variants
 │   ├── supported-images.md  # All 7 WSA variant details
 │   ├── troubleshooting.md   # Common issues and fixes
-│   └── faq.md               # Frequently asked questions
+│   ├── faq.md               # Frequently asked questions
+│   ├── admin-user-modules.md   # ADMIN/USER module images + password gate
+│   ├── img-manager.md          # IMG Manager GUI + archive Edit/Pack
+│   ├── open-with-registry.md   # .img -> Open with -> WSA IMG Manager
+│   ├── magisk-hook.md          # Boot hook install / repair / audit
+│   ├── boltware-manager.md     # List & remove system apps
+│   └── dispatcher.md           # init.c dispatcher: build & verify
 ├── assets/
-│   └── twrp.png             # Project logo
+│   ├── twrp.png             # Project logo
+│   ├── icon.ico, twrp.ico   # App / Open-with icons
+│   ├── 7z.exe               # Bundled 7-Zip
+│   ├── adb.exe              # Bundled platform tools
+│   ├── aaptpp.exe           # Bundled AAPT++
+│   ├── img-checker.exe      # Unpack internal .img
+│   ├── img-creater.exe      # Repack internal .img
+│   ├── fix.7z               # Magisk hook payload
+│   └── cygwin1.dll          # Helper runtime
+├── prebuilt/
+│   ├── init                 # Compiled dispatcher (static ELF64)
+│   └── SHA256SUMS           # Checksum of init
 ├── .github/
 │   ├── workflows/
-│   │   └── build-twrp.yml   # GitHub Actions build workflow
+│   │   ├── build-twrp.yml       # Full TWRP recovery build
+│   │   └── build-dispatcher.yml # Dispatcher-only build
 │   └── PULL_REQUEST_TEMPLATE.md
-├── init.c                   # Dispatcher source (compiled to ELF with musl-gcc)
+├── twrp.py                  # Main CLI tool (single file, ~6500 lines)
+├── init.c                   # Dispatcher source (compiled with musl-gcc)
 ├── info.json                # TWRP metadata template
 ├── patch.json               # Cpio injection map
 ├── requirements.txt         # Python dependencies
@@ -398,7 +447,7 @@ twrp-for-wsa/
 ├── SUPPORT.md               # Support and FAQ
 ├── ROADMAP.md               # Planned features
 ├── CONTRIBUTING.md          # Contribution guidelines
-├── LICENSE.md              # Source-Available / Community-Extension License
+├── LICENSE.md               # Source-Available / Community-Extension License
 ├── CHANGELOG.md             # Version history
 └── README.md                # This file
 ```
@@ -424,13 +473,13 @@ cd twrp-for-wsa
 pip install -r requirements.txt
 
 # Check status
-python src/twrp.py --status
+python twrp.py --status
 
 # Inject TWRP
-python src/twrp.py --inject twrp.7z
+python twrp.py --inject twrp.7z
 
 # Enable TWRP mode
-python src/twrp.py --enable-twrp
+python twrp.py --enable-twrp
 ```
 
 ### Build TWRP Recovery Image (GitHub Actions)
@@ -467,6 +516,12 @@ The TWRP recovery image is built automatically from source:
 | [Developer Guide](docs/developer-guide.md) | Contributing and development setup |
 | [FAQ](docs/faq.md) | Frequently asked questions |
 | [Troubleshooting](docs/troubleshooting.md) | Common issues and solutions |
+| [Admin & User Modules](docs/admin-user-modules.md) | Dual module images and the password gate |
+| [IMG Manager](docs/img-manager.md) | `--gui` archive browser, Edit/Pack, backups |
+| [Open With Registry](docs/open-with-registry.md) | `.img` right-click → WSA IMG Manager |
+| [Magisk Hook](docs/magisk-hook.md) | Install / repair / audit the boot hook |
+| [Boltware Manager](docs/boltware-manager.md) | List and remove system apps |
+| [Boot Dispatcher](docs/dispatcher.md) | `init.c` build, CI and verification |
 | [Changelog](CHANGELOG.md) | Version history and release notes |
 | [Security Policy](SECURITY.md) | Vulnerability reporting and security |
 | [Support](SUPPORT.md) | Support channels and FAQ |
@@ -523,7 +578,7 @@ The TWRP recovery image is built automatically from source:
 | TWRP | [TeamWin](https://twrp.me) | Recovery project |
 | TWRP Source Build | [minimal-manifest-twrp](https://github.com/minimal-manifest-twrp) | TWRP AOSP manifest |
 | Dispatcher | `init.c` (this repo) | Boot decision binary (compiled with musl-gcc) |
-| CLI Tool | `src/twrp.py` (this repo) | Injection, toggle, status commands |
+| CLI Tool | `twrp.py` (this repo) | Injection, toggle, status, modules, IMG Manager |
 | WSA Installer | [AT Tech Zone](https://www.youtube.com/@AT_Tech_Zone) | Parent project |
 | WSA Builds | [MustardChef/WSABuilds](https://github.com/MustardChef/WSABuilds) | Pre-built WSA archives |
 

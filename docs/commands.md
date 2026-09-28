@@ -16,6 +16,15 @@ Complete reference for all `twrp.exe` commands and options.
   - [--disable-twrp](#--disable-twrp)
   - [--path](#--path)
   - [--debug](#--debug)
+  - [--gui](#--gui)
+  - [--install-as-system-app](#--install-as-system-app)
+  - [--update-as-system-app](#--update-as-system-app)
+  - [--admin / --user](#--admin--user)
+  - [--list-of-boltware](#--list-of-boltware)
+  - [--uninstall-boltware](#--uninstall-boltware)
+  - [--install-magisk-hook](#--install-magisk-hook)
+  - [--repaire-magisk-hook](#--repaire-magisk-hook)
+  - [--register-img / --unregister-img](#--register-img--unregister-img)
 - [The `into` Keyword](#the-into-keyword)
 - [Exit Codes](#exit-codes)
 - [Examples](#examples)
@@ -295,6 +304,116 @@ twrp.exe --inject twrp.7z --debug
 
 ---
 
+### --gui
+
+Open the **IMG Manager** for browsing and editing the cpio archive.
+
+```cmd
+twrp.exe --gui
+twrp.exe --gui --path D:\initrd.img
+```
+
+Resolves the image from `--path` → `<WSA>\Tools\initrd.img` → file dialog, and
+offers a `*.img.bak-*` backup if the live image cannot be read.
+Full guide: [IMG Manager](img-manager.md).
+
+---
+
+### --install-as-system-app
+
+```cmd
+twrp.exe --install-as-system-app <APK…> [--admin | --user] [--path <initrd.img>]
+```
+
+Installs APK(s) into the module image. **Defaults to the USER module**; pass
+`--admin` to target the ADMIN module (password prompt).
+
+---
+
+### --update-as-system-app
+
+```cmd
+twrp.exe --update-as-system-app <APK…> [--admin | --user]
+```
+
+Same as install, but overwrites an app that is already present
+(`force_update=True`).
+
+---
+
+### --admin / --user
+
+```cmd
+twrp.exe --install-as-system-app app.apk --admin    # lsp_wsa-installer.img (password)
+twrp.exe --list-of-boltware --user                  # lsp_wsa-installer-user.img
+```
+
+Mutually exclusive (`--admin --user` → exit 2). Defaults:
+install/update = `--user`; `--list-of-boltware` / `--uninstall-boltware` with no
+flag scan **both**; `--status` always reports both.
+Full guide: [Admin & User Modules](admin-user-modules.md).
+
+---
+
+### --list-of-boltware
+
+```cmd
+twrp.exe --list-of-boltware [--admin | --user] [--path <initrd.img>]
+```
+
+Lists system apps per module image (`[admin]` / `[user]` sections). Requires a
+non-stock image.
+
+---
+
+### --uninstall-boltware
+
+```cmd
+twrp.exe --uninstall-boltware [PACKAGE…] [--admin | --user]
+```
+
+No package argument = remove the whole module image. Packages are merged and
+de-duplicated across the selected images, written to `overlay.d/sbin/uninstall.txt`
+once, and removed **on the next boot**.
+Full guide: [Boltware Manager](boltware-manager.md).
+
+---
+
+### --install-magisk-hook
+
+```cmd
+twrp.exe --install-magisk-hook [--path <initrd.img>]
+```
+
+Installs the boot hook (`overlay.d/sbin/post-fs-data.sh` + `lspinit` /
+`magiskinit` / `wsainit`) from `assets/fix.7z`. Skips when already present.
+
+---
+
+### --repaire-magisk-hook
+
+```cmd
+twrp.exe --repaire-magisk-hook [--path <initrd.img>]    # alias: --repair-magisk-hook
+```
+
+Force a full rebuild from `fix.7z`, discarding the installed hook, then verify
+with `hook_issues()`. Full guide: [Magisk Hook](magisk-hook.md).
+
+---
+
+### --register-img / --unregister-img
+
+```cmd
+twrp.exe --register-img        # .img -> Open with -> WSA IMG Manager
+twrp.exe --unregister-img      # remove those keys again
+```
+
+Writes additive Explorer keys under `HKLM\Software\Classes` (falls back to
+`HKCU`) and never changes `.img`'s default handler. Also runs automatically on
+app start. Full guide: [Open With Registry](open-with-registry.md).
+
+---
+
 ## The `into` Keyword
 
 The `into` keyword is a **literal keyword** (not a flag) that separates the source from the destination within the cpio archive.
@@ -329,7 +448,8 @@ twrp.exe --inject <source> into <destination>
 | Code | Meaning |
 |:-----|:--------|
 | 0 | Success |
-| 1 | Error (file not found, invalid archive, etc.) |
+| 1 | Error (file not found, invalid archive, password refused, stock image, WSA missing) |
+| 2 | Usage error (e.g. `--admin --user` together, unknown option) |
 
 ---
 
@@ -392,4 +512,43 @@ twrp.exe --inject twrp.7z --debug
 
 :: Check status with debug
 twrp.exe --status --debug
+```
+
+### System Apps
+
+```cmd
+:: Install into the USER module (default)
+twrp.exe --install-as-system-app com.example.app.apk
+
+:: Install into the ADMIN module (password prompt)
+twrp.exe --install-as-system-app com.example.app.apk --admin
+
+:: Overwrite an existing system app
+twrp.exe --update-as-system-app com.example.app.apk --admin
+
+:: List everything installed in both modules
+twrp.exe --list-of-boltware
+
+:: Schedule a removal for the next boot
+twrp.exe --uninstall-boltware com.example.old
+
+:: Report WSA + both modules
+twrp.exe --status
+```
+
+### Hook Maintenance
+
+```cmd
+twrp.exe --install-magisk-hook
+twrp.exe --repaire-magisk-hook
+twrp.exe --status
+```
+
+### IMG Manager & Explorer
+
+```cmd
+twrp.exe --gui
+twrp.exe --gui --path D:\initrd.img
+twrp.exe --register-img
+twrp.exe --unregister-img
 ```

@@ -56,21 +56,20 @@ pip install -r requirements.txt
 
 ```bash
 # Check status
-python src/twrp.py --status
+python twrp.py --status
 
 # Inject TWRP
-python src/twrp.py --inject twrp.7z
+python twrp.py --inject twrp.7z
 
 # Enable TWRP
-python src/twrp.py --enable-twrp
+python twrp.py --enable-twrp
 ```
 
 ## Project Structure
 
 ```
 twrp-for-wsa/
-├── src/
-│   └── twrp.py              # Main CLI tool (~1500 lines)
+├── twrp.py                  # Main CLI tool (~6500 lines)
 ├── docs/
 │   ├── installation.md      # Installation guide
 │   ├── commands.md          # CLI reference
@@ -82,12 +81,21 @@ twrp-for-wsa/
 │   ├── variants.md          # WSA image variants
 │   ├── supported-images.md  # All 7 WSA variant details
 │   ├── troubleshooting.md   # Common issues and fixes
-│   └── faq.md               # Frequently asked questions
-├── assets/
-│   └── twrp.png             # Project logo
+│   ├── faq.md               # Frequently asked questions
+│   ├── admin-user-modules.md   # Module images + password gate
+│   ├── img-manager.md          # IMG Manager GUI / Edit-Pack
+│   ├── open-with-registry.md   # .img Explorer registration
+│   ├── magisk-hook.md          # Boot hook install / repair
+│   ├── boltware-manager.md     # System app management
+│   └── dispatcher.md           # init.c build & verification
+├── assets/                  # Tools, icons, fix.7z payload
+├── prebuilt/
+│   ├── init                 # Compiled dispatcher (static ELF64)
+│   └── SHA256SUMS
 ├── .github/
 │   ├── workflows/
-│   │   └── build-twrp.yml   # GitHub Actions build workflow
+│   │   ├── build-twrp.yml           # Full TWRP recovery build
+│   │   └── build-dispatcher.yml     # Dispatcher-only build
 │   └── PULL_REQUEST_TEMPLATE.md
 ├── init.c                   # Dispatcher source (compiled to ELF with musl-gcc)
 ├── info.json                # TWRP metadata template
@@ -148,33 +156,47 @@ The TWRP recovery image is built automatically via GitHub Actions:
 ```bash
 # Using Nuitka
 pip install nuitka
-python -m nuitka --standalone --output-filename=twrp.exe src/twrp.py
+python -m nuitka --standalone --output-filename=twrp.exe twrp.py
 
 # Using PyInstaller
 pip install pyinstaller
-pyinstaller --onefile src/twrp.py --name twrp.exe
+pyinstaller --onefile twrp.py --name twrp.exe
 ```
 
 ### Build Dispatcher
 
-The dispatcher is compiled from `init.c` using `musl-gcc`:
+The dispatcher is compiled from `init.c` with the **musl** toolchain:
 
 ```bash
 # On Linux (GitHub Actions)
-sudo apt-get install musl-tools
-musl-gcc -static -o init init.c
+sudo apt-get install -y musl-tools
+musl-gcc -static -Os -Wall -Wextra -Wno-comment -s -o init init.c
+file init        # ELF 64-bit LSB executable, x86-64, static, no interpreter
 ```
+
+Or use the dispatcher-only workflow:
+
+```bash
+gh workflow run build-dispatcher.yml -R WSA-Installer/twrp-for-wsa
+gh run watch     -R WSA-Installer/twrp-for-wsa
+gh run download  -R WSA-Installer/twrp-for-wsa
+```
+
+The verified binary is committed as `prebuilt/init` together with
+`prebuilt/SHA256SUMS`. `-Wno-comment` is required because
+`/overlay.d/sbin/*` appears inside a block comment; `init.c` itself must not
+be modified for that warning. See [dispatcher.md](dispatcher.md).
 
 ## Testing
 
 ### Manual Testing
 
-1. Check status: `python src/twrp.py --status`
-2. Inject TWRP: `python src/twrp.py --inject twrp.7z`
-3. Enable TWRP: `python src/twrp.py --enable-twrp`
+1. Check status: `python twrp.py --status`
+2. Inject TWRP: `python twrp.py --inject twrp.7z`
+3. Enable TWRP: `python twrp.py --enable-twrp`
 4. Reboot WSA: `adb reboot recovery`
 5. Verify TWRP boots
-6. Disable TWRP: `python src/twrp.py --disable-twrp`
+6. Disable TWRP: `python twrp.py --disable-twrp`
 7. Reboot WSA: `adb reboot`
 8. Verify Android boots
 

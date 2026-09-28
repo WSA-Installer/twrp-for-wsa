@@ -68,23 +68,30 @@ cd twrp-for-wsa
 pip install -r requirements.txt
 
 # Run
-python src/twrp.py --status
+python twrp.py --status
 ```
 
 ### Project Structure
 
 ```
 twrp-for-wsa/
-├── src/
-│   └── twrp.py              # Main CLI tool (open source)
+├── twrp.py                  # Main CLI tool (open source, single file)
 ├── docs/
 │   ├── installation.md      # Installation guide
 │   ├── commands.md          # CLI reference
 │   ├── architecture.md      # How it works
 │   ├── supported-images.md  # WSA variant details
-│   └── troubleshooting.md   # Common issues
-├── assets/
-│   └── twrp.png             # Project logo
+│   ├── troubleshooting.md   # Common issues
+│   ├── admin-user-modules.md   # Module images + password gate
+│   ├── img-manager.md          # IMG Manager / archive editing
+│   ├── open-with-registry.md   # .img Explorer registration
+│   ├── magisk-hook.md          # Boot hook
+│   ├── boltware-manager.md     # System app management
+│   └── dispatcher.md           # init.c build & verification
+├── assets/                  # Tools, icons, fix.7z payload
+├── prebuilt/
+│   ├── init                 # Compiled dispatcher (static ELF64)
+│   └── SHA256SUMS
 ├── init.c                   # Dispatcher source (compiled to ELF)
 ├── info.json                # TWRP metadata template
 ├── patch.json               # Cpio injection map
@@ -94,7 +101,8 @@ twrp-for-wsa/
 ├── README.md                # Project documentation
 └── .github/
     └── workflows/
-        └── build-twrp.yml   # GitHub Actions build
+        ├── build-twrp.yml           # Full TWRP recovery build
+        └── build-dispatcher.yml     # Dispatcher-only build
 ```
 
 ---
@@ -181,7 +189,7 @@ Before submitting a PR, test the following flows:
 ### Development
 
 ```bash
-python src/twrp.py --status
+python twrp.py --status
 ```
 
 ### TWRP Recovery Image (GitHub Actions)
@@ -192,6 +200,23 @@ The TWRP recovery image is built automatically via GitHub Actions:
 2. Click **Build TWRP x86_64 for WSA**
 3. Click **Run workflow**
 4. Download artifact from the completed run
+
+### Boot Dispatcher (`init.c`, GitHub Actions)
+
+```bash
+# Run the dispatcher-only workflow
+gh workflow run build-dispatcher.yml -R WSA-Installer/twrp-for-wsa
+gh run watch   -R WSA-Installer/twrp-for-wsa
+gh run download -R WSA-Installer/twrp-for-wsa
+
+# Or build it on any Linux box
+sudo apt-get install -y musl-tools
+musl-gcc -static -Os -Wall -Wextra -Wno-comment -s -o init init.c
+file init
+```
+
+The resulting binary is committed to `prebuilt/init` with
+`prebuilt/SHA256SUMS`. See [docs/dispatcher.md](docs/dispatcher.md).
 
 ---
 

@@ -76,9 +76,10 @@ If you discover a security vulnerability within TWRP for WSA, please send an ema
 
 This security policy applies to:
 
-- The `twrp.exe` CLI tool
+- The `twrp.exe` CLI tool / `twrp.py` script
 - The `init.c` dispatcher source code
-- The `src/twrp.py` injector script
+- The admin password gate (`--admin`, `WSA_ADMIN_PASSWORD`)
+- The Explorer `.img` registration (`--register-img`)
 - GitHub Actions build workflows
 
 This security policy does NOT apply to:

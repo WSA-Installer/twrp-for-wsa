@@ -9,6 +9,7 @@ Common questions about TWRP for WSA.
 - [General](#general)
 - [Installation](#installation)
 - [Usage](#usage)
+- [Modules, IMG Manager & Hook](#modules-img-manager--hook)
 - [Troubleshooting](#troubleshooting)
 - [Compatibility](#compatibility)
 
@@ -104,6 +105,95 @@ adb shell twrp install /sdcard/magisk.zip
 
 ---
 
+## Modules, IMG Manager & Hook
+
+### What is the difference between ADMIN and USER?
+
+System apps and hook files live in **two module images**, injected next to
+the main initrd:
+
+| Mode | Image | Used by |
+|:-----|:------|:--------|
+| ADMIN | `lsp_wsa-installer.img` | `--admin`, `--install-as-system-app … --admin` |
+| USER | `lsp_wsa-installer-user.img` | default when no flag is given |
+
+The USER image is always safe to touch; ADMIN is protected. See
+[Admin & User Modules](admin-user-modules.md).
+
+### Why does `--admin` ask for a password?
+
+The gate runs **before any archive is opened**, so a failed password never
+leaves a partially-written image behind. It compares the SHA-256 of your
+input, allows 3 attempts, and can be automated with
+`WSA_ADMIN_PASSWORD`. See [admin-user-modules.md](admin-user-modules.md#password-gate).
+
+### How do I list the pre-installed system apps?
+
+```cmd
+twrp.exe --list-of-boltware
+```
+
+Both images are scanned and each package is tagged `admin` or `user`
+(de-duplicated union).
+
+### How do I remove a system app permanently?
+
+```cmd
+twrp.exe --uninstall-boltware com.example.app
+```
+
+The package is added to `uninstall.txt`; the boot hook applies the removal
+on the **next** boot of Android. Details:
+[boltware-manager.md](boltware-manager.md).
+
+### How do I install an APK as a system app?
+
+```cmd
+twrp.exe --install-as-system-app app.apk            (USER module)
+twrp.exe --install-as-system-app app.apk --admin    (ADMIN module)
+twrp.exe --update-as-system-app app.apk
+```
+
+### What does `--gui` do?
+
+Opens the **IMG Manager** — a 7-Zip-style browser for `initrd.img`: extract,
+open inner archives (cpio/tar/zip/7z/gz/xz/bz2), edit scripts in place,
+stage changes and repack. Every save creates an
+`*.img.bak-YYYYMMDD-HHMMSS` backup first, with a restore picker.
+[img-manager.md](img-manager.md).
+
+### How do I open `.img` files by double-click in Explorer?
+
+```cmd
+twrp.exe --register-img
+```
+
+Registers `.img` → *Open with* → **WSA IMG Manager** (HKLM, HKCU fallback).
+Undo with `--unregister-img` — it is idempotent.
+[open-with-registry.md](open-with-registry.md).
+
+### What is the Magisk hook?
+
+A set of files under `overlay.d/sbin` (plus a marked block in
+`post-fs-data.sh`) that runs early in the Android boot and applies scheduled
+changes such as `uninstall.txt`.
+
+```cmd
+twrp.exe --install-magisk-hook     # install
+twrp.exe --repaire-magisk-hook     # force rebuild from fix.7z
+```
+
+`hook_issues()` audits the result.
+[magisk-hook.md](magisk-hook.md).
+
+### Where is the compiled dispatcher?
+
+`prebuilt/init` (static ELF64, musl-gcc) with its checksum in
+`prebuilt/SHA256SUMS`. It is rebuilt by the `build-dispatcher.yml` workflow.
+[dispatcher.md](dispatcher.md).
+
+---
+
 ## Troubleshooting
 
 ### TWRP is not booting
@@ -164,3 +254,9 @@ Yes. TWRP for WSA supports WSA images with and without Amazon Appstore.
 - [Architecture](architecture.md) — How it works internally
 - [Supported Images](supported-images.md) — All 7 WSA variants
 - [Troubleshooting](troubleshooting.md) — Common issues and solutions
+- [Admin & User Modules](admin-user-modules.md) — Dual module images + password gate
+- [IMG Manager](img-manager.md) — `--gui` archive browser and Edit/Pack
+- [Open With Registry](open-with-registry.md) — `.img` right-click integration
+- [Magisk Hook](magisk-hook.md) — Boot hook install, repair, audit
+- [Boltware Manager](boltware-manager.md) — List and remove system apps
+- [Boot Dispatcher](dispatcher.md) — `init.c` build and verification

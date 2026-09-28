@@ -6,10 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Module images**: dual ADMIN (`lsp_wsa-installer.img`) and USER (`lsp_wsa-installer-user.img`) initrd images with mode-aware defaults
+- `--admin` / `--user` mode flags; `--admin` is protected by a SHA-256 password gate (3 attempts, `WSA_ADMIN_PASSWORD` override)
+- `--install-as-system-app` / `--update-as-system-app` — install or overwrite APKs inside a module image
+- `--list-of-boltware` — list system apps in both images (union, de-duplicated, admin/user tags)
+- `--uninstall-boltware` — schedule removal through `uninstall.txt` (applied on next boot)
+- `--install-magisk-hook` / `--repaire-magisk-hook` — install, audit (`hook_issues()`) and force-rebuild the boot hook from `fix.7z`
+- `--gui` — IMG Manager: 7-Zip-style browser for the `initrd.img` cpio archive with Extract → Edit → Pack, text editor, undo/redo and auto backups (`*.img.bak-YYYYMMDD-HHMMSS`)
+- `--register-img` / `--unregister-img` — register `.img` → *Open with* → **WSA IMG Manager** in Explorer (HKLM, HKCU fallback)
+- `prebuilt/init` — committed static ELF64 dispatcher binary + `prebuilt/SHA256SUMS`
+- `.github/workflows/build-dispatcher.yml` — dispatcher-only CI build (musl-gcc, artifact + checksum)
+- Bundled tools: `7z.exe`, `adb.exe`, `aaptpp.exe`, `img-checker.exe`, `img-creater.exe`, `cygwin1.dll`
+- Icons: `icon.ico`, `twrp.ico`, `wsa_twrp_logo.png`
+- Six new docs: `admin-user-modules`, `img-manager`, `open-with-registry`, `magisk-hook`, `boltware-manager`, `dispatcher`
+
+### Changed
+- `twrp.py` moved from `src/twrp.py` to the repository root
+- `--status` now reports both module images alongside the WSA/initrd state
+- Documentation rewritten to describe the full 19-option CLI surface
+- Dispatcher build split from the 180-minute TWRP workflow into `build-dispatcher.yml`
+
+### Removed
+- `src/twrp.py` (replaced by root-level `twrp.py`)
+
+---
+
 ## [4.1.0] - 2026-09-18
 
 ### Added
-- Full open-source CLI tool (`src/twrp.py`)
+- Full open-source CLI tool (`twrp.py`)
 - `--inject` command for 7z extraction + cpio injection
 - `--inject-file` for single file injection with `into` keyword
 - `--inject-folder` for folder injection with `into` keyword
