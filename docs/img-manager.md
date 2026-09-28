@@ -26,7 +26,7 @@ dialog before the main window exists.
 
 | Class | Purpose |
 |---|---|
-| `ImgManagerWindow` | main frameless window: three toolbar rows, multi-column multi-select tree, status line, persistent **no-backup warning** |
+| `ImgManagerWindow` | main frameless window: four toolbar rows, multi-column multi-select tree, status line, persistent **no-backup warning** |
 | `ArchiveViewerDialog` | opens an archive that lives *inside* the image — **Extract selected / Extract all → Edit → Pack** |
 | `NestedImgDialog` | an internal `.img` inside the archive (extract with `img-checker.exe`, repack with `img-creater.exe`) — also has **Extract selected / Extract all** |
 | `ScriptEditorDialog` | plain-text edit of a file entry with mode preservation |
@@ -92,12 +92,12 @@ use. Everything happens in a temp folder.
 
 ---
 
-## CLI buttons (rows 2 and 3)
+## CLI buttons (rows 2–4)
 
 Row 1 keeps the file operations (extract, delete, rename, overwrite, add,
-new folder, refresh + Undo/Redo). Two more rows expose every CLI argument that
-makes sense while an image is open — `_CLI_ACTIONS` drives the buttons and
-`_on_cli()` dispatches to `self._cli_<key>()`:
+new folder, refresh + Undo/Redo). Three more rows expose every CLI argument
+that makes sense while an image is open — `_CLI_ACTIONS` drives the buttons
+and `_on_cli()` dispatches to `self._cli_<key>()`:
 
 | Row | Button | Handler | Runs |
 |---|---|---|---|
@@ -105,12 +105,15 @@ makes sense while an image is open — `_CLI_ACTIONS` drives the buttons and
 | 2 | **Install as system app…** | `_cli_install_system_app(False)` | APK picker → `PermissionManagerWindow` per package → `_flow_install_system_app` |
 | 2 | **Update as system app…** | `_cli_install_system_app(True)` | same flow with `force_update=True` |
 | 2 | **☐ Admin** | `_admin_gate()` | password gate for the two buttons above |
-| 2 | **Enable TWRP** / **Disable TWRP** | `_cli_enable()` / `_cli_disable()` | `_flow_enable` / `_flow_disable` |
-| 2 | **Install hook** / **Repair hook** | `_cli_install_hook()` / `_cli_repair_hook()` | `_flow_install_magisk_hook(force=False/True)` |
-| 3 | **Status** | `_cli_status()` | `WSATWRP.status()` |
-| 3 | **List system apps** | `_cli_list_apps()` | `list_boltware()` (admin + user modules) |
-| 3 | **Uninstall system app…** | `_cli_uninstall_app()` | package-name prompt → `uninstall_boltware()` |
-| 3 | **Register .img** / **Unregister .img** | `_cli_register_img()` / `_cli_unregister_img()` | `register_img_handler()` / `unregister_img_handler()` |
+| 2 | **Enable TWRP** / **Disable TWRP** | `_cli_enable()` / `_cli_disable()` | `_flow_enable` (installed-check gate) / `_flow_disable` |
+| 3 | **Install TWRP** / **Repair TWRP** | `_cli_install_twrp()` / `_cli_repair_twrp()` | `_flow_install_twrp(force=False/True)` — inject `twrp.7z` + `twrp_support=true` |
+| 3 | **Uninstall TWRP** | `_cli_uninstall_twrp()` | confirm (`wsainit`/`overlay.d` are *not* touched) → `_flow_uninstall_twrp` (removes `/sbin/twrp`, `/twres/`, `/etc/`, `/system/lib64/`, `init -> lspinit`, clears both flags) |
+| 3 | **Install hook** / **Repair hook** | `_cli_install_hook()` / `_cli_repair_hook()` | `_flow_install_magisk_hook(force=False/True)` |
+| 3 | **Uninstall hook** | `_cli_uninstall_hook()` | confirm (explains `wsainit -> init` and that the whole `overlay.d/` tree — module images included — goes) → `_flow_uninstall_magisk_hook` |
+| 4 | **Status** | `_cli_status()` | `WSATWRP.status()` |
+| 4 | **List system apps** | `_cli_list_apps()` | `list_boltware()` (admin + user modules) |
+| 4 | **Uninstall system app…** | `_cli_uninstall_app()` | package-name prompt → `uninstall_boltware()` |
+| 4 | **Register .img** / **Unregister .img** | `_cli_register_img()` / `_cli_unregister_img()` | `register_img_handler()` / `unregister_img_handler()` |
 
 ### How a button runs
 
@@ -178,9 +181,9 @@ copy /Y "C:\...\Tools\initrd.img.bak-20260928-101500" "C:\...\Tools\initrd.img"
   (`_on_double_click`), drag/size grip (`resizeEvent`, `_update_control_rects`)
 * Toolbar rows: (1) open, refresh, add file, add folder, new folder, rename,
   delete, extract, edit, apply, backup, restore (`_act_*`); (2) info, install /
-  update system app + Admin tick, enable / disable TWRP, install / repair hook;
-  (3) status, list / uninstall system app, register / unregister `.img`
-  (`_cli_*`)
+  update system app + Admin tick, enable / disable TWRP; (3) install / repair /
+  uninstall TWRP, install / repair / uninstall hook; (4) status, list /
+  uninstall system app, register / unregister `.img` (`_cli_*`)
 * `wheelEvent` / `_max_scroll` / `_hit` handle tree scrolling; `_fill`,
   `_refresh_buttons`, `_update_status` keep the chrome in sync
 * Keyboard: `keyPressEvent` (Enter opens, Delete removes, F5 refreshes)

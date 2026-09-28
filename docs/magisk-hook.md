@@ -5,8 +5,9 @@
 
 Added after `4.1.0`. Code: `twrp.py` (`add_hook_infrastructure()`,
 `hook_issues()`, `repair_hook_infrastructure()`, `override_hook_infrastructure()`,
-`patch_postfsdata()`). CLI: `--install-magisk-hook`,
-`--repaire-magisk-hook` (alias `--repair-magisk-hook`).
+`patch_postfsdata()`, `_flow_uninstall_magisk_hook()`). CLI:
+`--install-magisk-hook`, `--repaire-magisk-hook` (alias `--repair-magisk-hook`),
+`--uninstall-magisk-hook`.
 
 ---
 
@@ -28,7 +29,7 @@ The script source is **`assets/fix.7z`** — extracted with the bundled
 
 ---
 
-## The three operations
+## The four operations
 
 ### 1. Add — `add_hook_infrastructure()`
 
@@ -59,6 +60,26 @@ Read-only. Returns a list of human-readable problems (empty = healthy):
 `# --- TWRP uninstall handler` block if `POSTFSDATA_MARKER` is not already there
 (so the patch is applied at most once).
 
+### 4. Remove — `_flow_uninstall_magisk_hook()` (added after 4.1.0)
+
+Reverses the install in one pass:
+
+1. **Restores `/init`** — the hook put the real WSA init aside as `wsainit`
+   and replaced `/init` with a symlink. The flow removes `/init` and renames
+   `wsainit -> init`. Safety rule: when `wsainit` is missing while `/init` is
+   still a symlink it **aborts without removing anything** (there is no way to
+   reconstruct a bootable init)
+2. **Deletes the payload** — `lspinit`, `magiskinit`,
+   `overlay.d/init.lsp.magisk.rc`, `overlay.d/sbin/post-fs-data.sh`,
+   `init-ld.xz`, `magisk.xz`, `stub.xz`, `uninstall.txt` and `.backup/`
+3. **Removes the whole `overlay.d/` tree** — the directory only exists for
+   the hook, so module images (`lsp_*.img`) are removed with it
+
+No-op with `Magisk hook is not installed - nothing to remove`; ends with
+`Magisk hook uninstalled (N entries removed)`. The TWRP flags
+(`twrp_support`, `recovery_flag`) are **not** touched — use
+`--uninstall-twrp` for the recovery system itself.
+
 ---
 
 ## CLI
@@ -70,14 +91,19 @@ twrp.py --install-magisk-hook
 # Force a full rebuild from fix.7z, discarding whatever is installed
 twrp.py --repaire-magisk-hook        # alias: --repair-magisk-hook
 
+# Remove the hook entirely (wsainit becomes /init again, overlay.d/ goes)
+twrp.py --uninstall-magisk-hook
+
 # Either against the live WSA image or a detached file
 twrp.py --install-magisk-hook --path C:\initrd.img
+twrp.py --uninstall-magisk-hook --path C:\initrd.img
 ```
 
-Both flags launch the same windowed flow
+Install and repair launch the same windowed flow
 (`_flow_install_magisk_hook(..., force=…)`): `force=False` for install,
-`force=True` for repair. The flow reports each step in the log pane and detects
-whether it is working on the live WSA recovery system or a standalone file.
+`force=True` for repair. Uninstall runs `_flow_uninstall_magisk_hook()`.
+Each flow reports every step in the log pane and detects whether it is
+working on the live WSA recovery system or a standalone file.
 
 > Note the flag spelling: the primary option is `--repaire-magisk-hook`
 > (historic typo, kept for compatibility); `--repair-magisk-hook` is accepted as
@@ -119,6 +145,7 @@ See [Boltware Manager](boltware-manager.md).
 | `Magisk already installed, skipping hook infrastructure` | normal; use `--repaire-magisk-hook` to force a rebuild |
 | `Failed to rebuild Magisk hook!` | `override_hook_infrastructure()` could not re-add the tree — check `fix.7z` integrity |
 | Hook present but apps not mounted | `hook_issues()` will name the wrong mode / missing dir; run `--repaire-magisk-hook` |
+| Hook needs to go entirely | `--uninstall-magisk-hook` — restores `wsainit -> init`, removes the payload and the whole `overlay.d/` tree |
 | Uninstall "did nothing" | removal happens on the **next boot**; check the log in `/storage/emulated/0/WSA Installer/` |
 
 See also: [Admin & User Modules](admin-user-modules.md) · [Boltware Manager](boltware-manager.md) · [Flow](flow.md)

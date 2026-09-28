@@ -24,14 +24,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Six new docs: `admin-user-modules`, `img-manager`, `open-with-registry`, `magisk-hook`, `boltware-manager`, `dispatcher`
 - IMG Manager: **Extract selected** / **Extract all** in the archive viewer (multi-select tree, right-click *Select all / Invert / Clear*) and in the internal-image dialog — name-aware cpio, zip, tar and 7z extraction
 - IMG Manager toolbar rows 2–3: **Info**, **Install/Update as system app** (+ **Admin** tick), **Enable/Disable TWRP**, **Install/Repair hook**, **Status**, **List/Uninstall system app**, **Register/Unregister `.img`**
+- `--install-twrp` / `--repair-twrp` / `--uninstall-twrp` — TWRP payload lifecycle: inject `assets/twrp.7z` + `twrp_support=true` (no-op when already installed), force re-inject (`force=True`), and full removal (`/sbin/twrp`, `/twres/`, `/etc/`, `/system/lib64/` gone, `init -> lspinit` restored, `twrp_support` + `recovery_flag` cleared)
+- `--uninstall-magisk-hook` — restore the stock boot chain: `wsainit` is renamed back to `/init` (aborts if it cannot), the hook payload and `.backup/` are deleted and the whole `overlay.d/` tree is removed — module images (`lsp_*.img`) included; TWRP flags stay untouched
+- IMG Manager: **Install TWRP**, **Repair TWRP**, **Uninstall TWRP** and **Uninstall hook** buttons with confirmation dialogs; the toolbar grew to **four rows** (row 3 = TWRP lifecycle left / hook lifecycle right, row 4 = status/apps/`.img`), window height `H = 660 → 700`
+- `assets/twrp.7z` placeholder shipped so `--install-twrp` runs before a real payload exists (reports `Payload skipped` instead of failing)
+- `InitrdManager.get_twrp_support()` / `set_twrp_support()` — targeted `info.json` flag rewrite that preserves every other byte (entry may move to the end of the archive, harmless to the boot chain)
+- `set_recovery_flag()` regex fallback for `info.json` layouts the same-length byte pairs do not match (spacing/quoting variants)
 - `LogDialog` — scrolling transcript (timestamped, `Copy all`, `Save log…`) that runs any `_flow_*` on a worker thread and echoes every line to the terminal; `InfoDialog` for the one-shot Info report
 - Admin tick: password prompt for Install/Update, `WSA_ADMIN_PASSWORD` override, 3 wrong attempts disable the tick for the session and the operation falls back to the user module
 - Live-image guard: `_confirm_live()` warns about unapplied staged edits, `_after_live_change()` offers to reload the image after a CLI run modified it
 
 ### Changed
 - `twrp.py` moved from `src/twrp.py` to the repository root
+- **`--enable-twrp` now checks that TWRP is actually installed** before flipping `recovery_flag`: `twrp_support=false` stops with `TWRP is NOT installed …` + `--install-twrp` hint, missing files stop with the `twrp_missing()` list + `--repair-twrp` hint; `recovery_flag` is never touched when the gate aborts
+- Uninstall hooks **remove the whole `overlay.d/` tree** (not just the script files) — the directory only exists for the hook, so `lsp_*.img` module images go with it
 - `--status` now reports both module images alongside the WSA/initrd state
-- Documentation rewritten to describe the full 19-option CLI surface
+- Documentation rewritten to describe the full 23-option CLI surface
 - Dispatcher build split from the 180-minute TWRP workflow into `build-dispatcher.yml`
 
 ### Removed

@@ -89,7 +89,8 @@ The official WSA installation does not include any recovery mode. If something g
 |:--------|:------------|
 | Permanent Recovery | TWRP persists in WSA initrd.img across reboots |
 | One-Click Inject | `twrp.exe --inject twrp.7z` patches initrd.img |
-| Boot Toggle | `--enable-twrp` / `--disable-twrp` switches boot mode |
+| TWRP Lifecycle | `--install-twrp` / `--repair-twrp` / `--uninstall-twrp` inject, fix or remove the payload (`twrp_support`) |
+| Boot Toggle | `--enable-twrp` / `--disable-twrp` switches boot mode — enable checks TWRP is installed first |
 | Custom Dispatcher | ELF binary decides TWRP vs Android at boot |
 | ADB Recovery Access | Connect via ADB port 58526 in recovery mode |
 | Multi-Image Support | 7 WSA variants: Windows x64, ARM64, Amazon Fire |
@@ -119,6 +120,7 @@ The official WSA installation does not include any recovery mode. If something g
 | System-App Install/Update | `--install-as-system-app` / `--update-as-system-app` — default is the USER module |
 | Boltware Manager | `--list-of-boltware` / `--uninstall-boltware` across both images, de-duplicated |
 | Magisk Hook | `--install-magisk-hook` / `--repaire-magisk-hook` with a `hook_issues()` audit |
+| Hook Removal | `--uninstall-magisk-hook` — `wsainit → /init` restored, `overlay.d/` tree removed |
 | Scheduled Uninstall | Removals written to `uninstall.txt` and applied on next boot |
 
 ### TWRP Recovery Features
@@ -198,6 +200,10 @@ twrp.exe --enable-twrp
 
 Restart WSA. The next boot will load TWRP recovery instead of Android.
 
+> **Installed-check:** if the image has no TWRP yet (`twrp_support=false`) or
+> files are missing, `--enable-twrp` refuses, leaves `recovery_flag` untouched
+> and points you at `--install-twrp` / `--repair-twrp`.
+
 ### Step 4 — Reboot Back to Android
 
 ```cmd
@@ -218,8 +224,11 @@ Restart WSA. Android boots normally.
 | `twrp.exe --inject twrp.7z` | Extract 7z and inject TWRP into initrd.img |
 | `twrp.exe --inject-file info.json` | Inject a single file into initrd.img |
 | `twrp.exe --inject-folder twrp_files/` | Inject a folder into initrd.img |
-| `twrp.exe --enable-twrp` | Set recovery flag to boot TWRP |
+| `twrp.exe --enable-twrp` | Set recovery flag to boot TWRP (refuses when TWRP is not installed) |
 | `twrp.exe --disable-twrp` | Clear recovery flag to boot Android |
+| `twrp.exe --install-twrp` | Inject the TWRP payload and set `twrp_support=true` |
+| `twrp.exe --repair-twrp` | Force re-inject the TWRP payload and fix the flags |
+| `twrp.exe --uninstall-twrp` | Remove TWRP files and clear `twrp_support` + `recovery_flag` |
 | `twrp.exe --inject twrp.7z --path D:\initrd.img` | Patch a specific initrd.img file |
 | `twrp.exe --gui` | Open the IMG Manager (archive browser/editor) |
 | `twrp.exe --install-as-system-app app.apk` | Install a system app into the USER module |
@@ -229,6 +238,7 @@ Restart WSA. Android boots normally.
 | `twrp.exe --uninstall-boltware com.example.app` | Schedule removal on next boot |
 | `twrp.exe --install-magisk-hook` | Install the boot hook only |
 | `twrp.exe --repaire-magisk-hook` | Force-rebuild the hook from `fix.7z` |
+| `twrp.exe --uninstall-magisk-hook` | Remove the hook (`wsainit` becomes `/init` again) |
 | `twrp.exe --register-img` | Register `.img` → Open with → WSA IMG Manager |
 
 ### Examples

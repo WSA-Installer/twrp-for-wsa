@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sys
 import os
+import re
 import subprocess
 import time
 import shutil
@@ -374,6 +375,13 @@ EXEC_NAMES = {
 }
 TWRP_REQUIRED_FILES = ("/sbin/twrp", "/sbin/busybox", "/sbin/linker64", "/info.json")
 TWRP_REQUIRED_DIRS = ("/twres", "/etc", "/system/lib64")
+# twrp_support key inside info.json; value may be "True"/"true"/true/...
+TWRP_FLAG_RE = re.compile(
+    br'("twrp_support"\s*:\s*)("[^"]*"|true|false)', re.IGNORECASE)
+# same treatment for recovery_flag (byte patterns cover the shipped layout
+# only when the spacing matches exactly, hence the fallback)
+RECOVERY_FLAG_RE = re.compile(
+    br'("recovery_flag"\s*:\s*)("[^"]*"|true|false)', re.IGNORECASE)
 POSTFSDATA_UNINSTALL_BLOCK = (
     b"\n# --- TWRP uninstall handler (background) ---\n"
     b"(\n"
@@ -1385,7 +1393,69 @@ class InitrdManager:
                         _debug(f"set_recovery_flag: {result} replacements ({old!r} -> {new!r})")
                         return result
         _debug("set_recovery_flag: no pattern matched")
-        return 0
+        # The byte pairs only cover the shipped spacing ("true" with a
+        # trailing space); fall back to a targeted rewrite for every other
+        # layout so Enable/Disable keeps working after info.json is re-saved.
+        data = CpioUtils.read_file(self.path, "info.json")
+        if not data:
+            _debug("set_recovery_flag fallback: no info.json")
+            return 0
+        wanted = b'"true"' if value else b'"false"'
+        new_data, count = RECOVERY_FLAG_RE.subn(
+            lambda m: m.group(1) + wanted, data, count=1)
+        if not count or new_data == data:
+            _debug("set_recovery_flag fallback: nothing to change")
+            return 0
+        mode = None
+        for name, entry_mode, _size in CpioUtils.list_entries(self.path):
+            if name == "info.json":
+                mode = entry_mode
+                break
+        CpioUtils.overwrite_file(self.path, "info.json", new_data, mode=mode)
+        _debug("set_recovery_flag fallback: info.json rewritten")
+        return 1
+
+    def get_twrp_support(self):
+        info = self.read_info()
+        if info is None:
+            _debug("get_twrp_support() -> False (no info)")
+            return False
+        raw = info.get("twrp_support", "false")
+        if isinstance(raw, str):
+            flag = raw.strip().lower() == "true"
+        else:
+            flag = bool(raw)
+        _debug(f"get_twrp_support() -> {flag}")
+        return flag
+
+    def set_twrp_support(self, value=True):
+        """Rewrite the twrp_support key inside info.json.
+
+        A targeted regex on the raw payload keeps every other byte of the
+        entry (notably the recovery_flag pattern set_recovery_flag() hunts
+        for) exactly as it was; only the matched value is swapped."""
+        _debug(f"set_twrp_support({value})")
+        data = CpioUtils.read_file(self.path, "info.json")
+        if not data:
+            _debug("set_twrp_support: no info.json")
+            return 0
+        wanted = b'"true"' if value else b'"false"'
+        new_data, count = TWRP_FLAG_RE.subn(
+            lambda m: m.group(1) + wanted, data, count=1)
+        if not count:
+            _debug("set_twrp_support: twrp_support key not found")
+            return 0
+        if new_data == data:
+            _debug("set_twrp_support: already in that state")
+            return 0
+        mode = None
+        for name, entry_mode, _size in CpioUtils.list_entries(self.path):
+            if name == "info.json":
+                mode = entry_mode
+                break
+        CpioUtils.overwrite_file(self.path, "info.json", new_data, mode=mode)
+        _debug("set_twrp_support: info.json rewritten")
+        return 1
 
     def is_stock(self):
         result = not self.has_info_json()
@@ -4318,7 +4388,7 @@ class ImgManagerWindow(QWidget):
     """
 
     W = 1100
-    H = 660
+    H = 700
     HDR_H = 46
     RADIUS = 14
     CTL_SIZE = 26
@@ -4344,8 +4414,12 @@ class ImgManagerWindow(QWidget):
         ("update_app", "Update as system app\u2026"),
         ("enable", "Enable TWRP"),
         ("disable", "Disable TWRP"),
+        ("install_twrp", "Install TWRP"),
+        ("repair_twrp", "Repair TWRP"),
+        ("uninstall_twrp", "Uninstall TWRP"),
         ("install_hook", "Install hook"),
         ("repair_hook", "Repair hook"),
+        ("uninstall_hook", "Uninstall hook"),
         ("status", "Status"),
         ("list_apps", "List system apps"),
         ("uninstall_app", "Uninstall system app\u2026"),
@@ -4498,8 +4572,8 @@ class ImgManagerWindow(QWidget):
         row.addWidget(self._redo_btn)
         outer.addLayout(row)
 
-        # row 2 -- image info, system-app install/update (+ Admin tick) and the
-        # two TWRP switches / hook buttons that used to be CLI-only
+        # row 2 -- image info, system-app install/update (+ Admin tick) and
+        # the two TWRP switches that used to be CLI-only
         cli = dict(self._CLI_ACTIONS)
         row2 = QHBoxLayout()
         row2.setSpacing(6)
@@ -4519,19 +4593,29 @@ class ImgManagerWindow(QWidget):
         self._admin_cb.setCursor(Qt.PointingHandCursor)
         row2.addWidget(self._admin_cb)
         row2.addStretch(1)
-        for key in ("enable", "disable", "install_hook", "repair_hook"):
+        for key in ("enable", "disable"):
             row2.addWidget(self._cli_button(cli[key], key))
         outer.addLayout(row2)
 
-        # row 3 -- status, system-app listing/removal and the .img handlers
+        # row 3 -- TWRP lifecycle on the left, boot-hook lifecycle on the right
         row3 = QHBoxLayout()
         row3.setSpacing(6)
-        for key in ("status", "list_apps", "uninstall_app"):
+        for key in ("install_twrp", "repair_twrp", "uninstall_twrp"):
             row3.addWidget(self._cli_button(cli[key], key))
         row3.addStretch(1)
-        for key in ("register_img", "unregister_img"):
+        for key in ("install_hook", "repair_hook", "uninstall_hook"):
             row3.addWidget(self._cli_button(cli[key], key))
         outer.addLayout(row3)
+
+        # row 4 -- status, system-app listing/removal and the .img handlers
+        row4 = QHBoxLayout()
+        row4.setSpacing(6)
+        for key in ("status", "list_apps", "uninstall_app"):
+            row4.addWidget(self._cli_button(cli[key], key))
+        row4.addStretch(1)
+        for key in ("register_img", "unregister_img"):
+            row4.addWidget(self._cli_button(cli[key], key))
+        outer.addLayout(row4)
 
         self._tree = QTreeWidget()
         self._tree.setColumnCount(5)
@@ -5366,6 +5450,54 @@ class ImgManagerWindow(QWidget):
                      dict(target_initrd=self._real_path, force=True))
         dlg.show()
 
+    def _cli_install_twrp(self):
+        if not self._confirm_live("install TWRP recovery"):
+            return
+        dlg = LogDialog("Install TWRP recovery", self)
+        dlg.finished.connect(lambda _r: self._after_live_change())
+        dlg.run_flow(self._twrp._flow_install_twrp,
+                     dict(target_initrd=self._real_path, force=False))
+        dlg.show()
+
+    def _cli_repair_twrp(self):
+        if not self._confirm_live("repair TWRP recovery"):
+            return
+        dlg = LogDialog("Repair TWRP recovery", self)
+        dlg.finished.connect(lambda _r: self._after_live_change())
+        dlg.run_flow(self._twrp._flow_install_twrp,
+                     dict(target_initrd=self._real_path, force=True))
+        dlg.show()
+
+    def _cli_uninstall_twrp(self):
+        if not self._confirm(
+                "Uninstall TWRP?\n\n"
+                "Removes /sbin/twrp, /sbin/busybox, /sbin/linker64,\n"
+                "/twres/, /etc/ and /system/lib64/, then sets\n"
+                "twrp_support=false and recovery_flag=false in info.json."):
+            return
+        if not self._confirm_live("uninstall TWRP recovery"):
+            return
+        dlg = LogDialog("Uninstall TWRP recovery", self)
+        dlg.finished.connect(lambda _r: self._after_live_change())
+        dlg.run_flow(self._twrp._flow_uninstall_twrp,
+                     dict(target_initrd=self._real_path))
+        dlg.show()
+
+    def _cli_uninstall_hook(self):
+        if not self._confirm(
+                "Uninstall the Magisk hook?\n\n"
+                "/wsainit is renamed to /init; lspinit, magiskinit and the\n"
+                "whole overlay.d/ tree (hook scripts + module images) are\n"
+                "removed."):
+            return
+        if not self._confirm_live("uninstall the boot hook"):
+            return
+        dlg = LogDialog("Uninstall Magisk hook", self)
+        dlg.finished.connect(lambda _r: self._after_live_change())
+        dlg.run_flow(self._twrp._flow_uninstall_magisk_hook,
+                     dict(target_initrd=self._real_path))
+        dlg.show()
+
     def _cli_register_img(self):
         dlg = LogDialog("Register .img handler", self)
         dlg.run_printing(register_img_handler, {})
@@ -5874,6 +6006,23 @@ class WSATWRP:
             target_initrd=initrd_path,
         ))
 
+    def install_twrp(self, initrd_path=None):
+        return self._launch_gui(self._flow_install_twrp, dict(
+            target_initrd=initrd_path,
+            force=False,
+        ))
+
+    def repair_twrp(self, initrd_path=None):
+        return self._launch_gui(self._flow_install_twrp, dict(
+            target_initrd=initrd_path,
+            force=True,
+        ))
+
+    def uninstall_twrp(self, initrd_path=None):
+        return self._launch_gui(self._flow_uninstall_twrp, dict(
+            target_initrd=initrd_path,
+        ))
+
     def _flow(self, log, window, target_initrd=None, inject_file=None,
               inject_folder=None, inject_7z=None, inject_dest="/"):
         _debug(f"_flow() started")
@@ -6134,6 +6283,51 @@ class WSATWRP:
 
         window.request_close()
 
+    @staticmethod
+    def _resolve_initrd(log, window, target_initrd):
+        """Shared head of the TWRP/hook flows: locate the image and decide
+        whether it is the live WSA one. Returns (path, is_wsa_img), or None
+        after reporting the problem and closing the dialog."""
+        is_wsa_img = False
+        if target_initrd:
+            initrd_path = target_initrd
+            if not os.path.exists(initrd_path):
+                log(f"File not found: {initrd_path}")
+                time.sleep(2)
+                window.request_close()
+                return None
+            log(f"File: {os.path.basename(initrd_path)} "
+                f"({os.path.getsize(initrd_path):,} bytes)")
+            wsa_path = WSADetector.find_path()
+            if wsa_path:
+                if os.path.normpath(initrd_path) == os.path.normpath(
+                        WSADetector.initrd_path(wsa_path)):
+                    is_wsa_img = True
+                    log("Detected: WSA recovery system")
+                else:
+                    log("Detected: external file (not WSA)")
+            else:
+                log("Detected: standalone file (no WSA)")
+        else:
+            log("Checking WSA installation...")
+            time.sleep(1)
+            wsa_path = WSADetector.find_path()
+            if not wsa_path:
+                log("WSA not found!")
+                time.sleep(2)
+                window.request_close()
+                return None
+            log(f"WSA found: {os.path.basename(wsa_path)}")
+            initrd_path = WSADetector.initrd_path(wsa_path)
+            if not os.path.exists(initrd_path):
+                log("Recovery system not found!")
+                time.sleep(2)
+                window.request_close()
+                return None
+            is_wsa_img = True
+        time.sleep(0.5)
+        return initrd_path, is_wsa_img
+
     def _flow_enable(self, log, window, target_initrd=None):
         _debug("_flow_enable() started")
         is_wsa_img = False
@@ -6182,6 +6376,22 @@ class WSATWRP:
         if initrd.is_stock():
             log("Stock WSA (no recovery system installed)")
             log(f"Run {CLI_NAME} without --enable-twrp to install first")
+            time.sleep(2)
+            window.request_close()
+            return
+        if not initrd.get_twrp_support():
+            log("TWRP is NOT installed (twrp_support = false)")
+            log(f"Run {CLI_NAME} --install-twrp first (or press "
+                "'Install TWRP' in the manager)")
+            time.sleep(2)
+            window.request_close()
+            return
+        missing = initrd.twrp_missing()
+        if missing:
+            log("TWRP install is incomplete - missing:")
+            for item in missing:
+                log(f"  - {item}")
+            log(f"Run {CLI_NAME} --repair-twrp first (or press 'Repair TWRP')")
             time.sleep(2)
             window.request_close()
             return
@@ -6284,6 +6494,174 @@ class WSATWRP:
             log("Done! Normal boot restored.")
         else:
             log("Done!")
+        time.sleep(1)
+        window.request_close()
+
+    def _flow_install_twrp(self, log, window, target_initrd=None, force=False):
+        _debug(f"_flow_install_twrp(force={force}) started")
+        resolved = self._resolve_initrd(log, window, target_initrd)
+        if resolved is None:
+            return
+        initrd_path, is_wsa_img = resolved
+
+        initrd = InitrdManager(initrd_path)
+        if initrd.is_stock():
+            log("Stock WSA (no recovery system installed)")
+            log(f"Run {CLI_NAME} without --install-twrp to install first")
+            time.sleep(2)
+            window.request_close()
+            return
+
+        flag_before = initrd.get_twrp_support()
+        missing_before = initrd.twrp_missing()
+        log(f"twrp_support: {'true' if flag_before else 'false'}")
+        if missing_before:
+            log(f"TWRP files missing: {', '.join(missing_before)}")
+        if flag_before and not missing_before and not force:
+            log("TWRP already installed, nothing to do")
+            log("")
+            log(f"To boot TWRP: {CLI_NAME} --enable-twrp")
+            time.sleep(2)
+            window.request_close()
+            return
+
+        if is_wsa_img:
+            log("Stopping WSA...")
+            KillWSA.kill_all()
+            time.sleep(3)
+        else:
+            log("Patching file directly...")
+
+        if os.path.exists(ASSET_TWRP_7Z):
+            log(f"Injecting: {os.path.basename(ASSET_TWRP_7Z)}")
+            try:
+                initrd.inject_7z_with_patch(ASSET_TWRP_7Z, "/")
+            except RuntimeError as exc:
+                log(f"Payload skipped: {exc}")
+        else:
+            log(f"{os.path.basename(ASSET_TWRP_7Z)} not found - "
+                "updating info.json only")
+
+        initrd = InitrdManager(initrd_path)
+        initrd.set_twrp_support(True)
+        initrd = InitrdManager(initrd_path)
+        now_flag = initrd.get_twrp_support()
+        log(f"twrp_support: {'true' if flag_before else 'false'} -> "
+            f"{'true' if now_flag else 'false'}")
+        if not now_flag:
+            log("WARNING: twrp_support key missing or could not be written")
+        missing_after = initrd.twrp_missing()
+        if missing_after:
+            log("WARNING: TWRP still incomplete - missing:")
+            for item in missing_after:
+                log(f"  - {item}")
+            log("Fill assets/twrp.7z with a real payload and run --repair-twrp")
+        else:
+            log("TWRP installed successfully!")
+            log(f"Next: {CLI_NAME} --enable-twrp")
+
+        if is_wsa_img:
+            log("Starting WSA...")
+            WSADetector.ensure_running()
+            time.sleep(15)
+        else:
+            log("Patch complete!")
+        time.sleep(1)
+        window.request_close()
+
+    def _flow_uninstall_twrp(self, log, window, target_initrd=None):
+        _debug("_flow_uninstall_twrp() started")
+        resolved = self._resolve_initrd(log, window, target_initrd)
+        if resolved is None:
+            return
+        initrd_path, is_wsa_img = resolved
+
+        initrd = InitrdManager(initrd_path)
+        if initrd.is_stock():
+            log("Stock WSA - nothing to uninstall")
+            time.sleep(2)
+            window.request_close()
+            return
+
+        present = {name for name, *_ in CpioUtils.scan_entries(initrd_path)}
+        files_here = [
+            f"/{name.strip('/')}" for name in TWRP_REQUIRED_FILES
+            if name.strip("/") != "info.json" and name.strip("/") in present]
+        dirs_here = [
+            name.strip("/") + "/" for name in TWRP_REQUIRED_DIRS
+            if any(n.startswith(name.strip("/") + "/") for n in present)]
+        flag_before = initrd.get_twrp_support()
+        recovery_before = initrd.get_recovery_flag()
+        if not flag_before and not files_here and not dirs_here:
+            log("TWRP is not installed - nothing to remove")
+            time.sleep(2)
+            window.request_close()
+            return
+
+        log(f"twrp_support: {'true' if flag_before else 'false'}")
+        log(f"recovery_flag: {'true' if recovery_before else 'false'}")
+        if is_wsa_img:
+            log("Stopping WSA...")
+            KillWSA.kill_all()
+            time.sleep(3)
+        else:
+            log("Patching file directly...")
+
+        log("Removing TWRP files...")
+        for name in ("sbin/twrp", "sbin/busybox", "sbin/linker64"):
+            if name in present:
+                CpioUtils.delete_file(initrd_path, name)
+                log(f"  removed /{name}")
+            else:
+                log(f"  skipped /{name} (not present)")
+        for name in ("twres", "etc", "system/lib64"):
+            hits = [n for n in present
+                    if n == name or n.startswith(name + "/")]
+            if hits:
+                CpioUtils.delete_tree(initrd_path, name)
+                log(f"  removed /{name}/ ({len(hits)} entries)")
+            else:
+                log(f"  skipped /{name}/ (not present)")
+
+        # the payload ships the dispatcher as /init; without TWRP it must not
+        # stay in front of the boot chain - fall back to lspinit when present
+        init_mode = next(
+            (m for n, m, _s in CpioUtils.list_entries(initrd_path)
+             if n == "init"), None)
+        if init_mode is not None and (init_mode & 0o170000) != 0o120000:
+            if "lspinit" in present:
+                CpioUtils.delete_file(initrd_path, "init")
+                CpioUtils.add_symlink(initrd_path, "init", "lspinit")
+                log("  /init: dispatcher -> init -> lspinit")
+            else:
+                log("  kept /init (no lspinit to fall back to)")
+        elif init_mode is None:
+            log("  /init not present (nothing to swap)")
+        else:
+            log("  /init already a symlink (kept)")
+
+        initrd = InitrdManager(initrd_path)
+        initrd.set_twrp_support(False)
+        if recovery_before:
+            initrd.set_recovery_flag(False)
+        initrd = InitrdManager(initrd_path)
+        now_flag = initrd.get_twrp_support()
+        now_recovery = initrd.get_recovery_flag()
+        log(f"twrp_support: {'true' if flag_before else 'false'} -> "
+            f"{'true' if now_flag else 'false'}")
+        log(f"recovery_flag: {'true' if recovery_before else 'false'} -> "
+            f"{'true' if now_recovery else 'false'}")
+        if not now_flag and not now_recovery:
+            log("TWRP uninstalled")
+        else:
+            log("WARNING: flags could not be cleared completely")
+
+        if is_wsa_img:
+            log("Starting WSA...")
+            WSADetector.ensure_running()
+            time.sleep(15)
+        else:
+            log("Patch complete!")
         time.sleep(1)
         window.request_close()
 
@@ -6938,6 +7316,11 @@ class WSATWRP:
             force=True,
         ))
 
+    def uninstall_magisk_hook(self, initrd_path=None):
+        return self._launch_gui(self._flow_uninstall_magisk_hook, dict(
+            target_initrd=initrd_path,
+        ))
+
     @staticmethod
     def _choose_backup_file(path):
         """Pick one <file>.img.bak-* next to `path`; None when cancelled."""
@@ -7153,6 +7536,101 @@ class WSATWRP:
         time.sleep(2)
         window.request_close()
 
+    def _flow_uninstall_magisk_hook(self, log, window, target_initrd=None):
+        _debug("_flow_uninstall_magisk_hook() started")
+        resolved = self._resolve_initrd(log, window, target_initrd)
+        if resolved is None:
+            return
+        initrd_path, is_wsa_img = resolved
+
+        initrd = InitrdManager(initrd_path)
+        present = {name for name, *_ in CpioUtils.scan_entries(initrd_path)}
+        hook_present = (POSTFSDATA_ARCNAME in present
+                        or "lspinit" in present
+                        or "overlay.d/init.lsp.magisk.rc" in present)
+        if not hook_present:
+            log("Magisk hook is not installed - nothing to remove")
+            time.sleep(2)
+            window.request_close()
+            return
+
+        if is_wsa_img:
+            log("Stopping WSA...")
+            KillWSA.kill_all()
+            time.sleep(3)
+        else:
+            log("Patching file directly...")
+
+        log("Removing Magisk hook...")
+
+        # 1. /init: the hook replaced it with a symlink to lspinit and put the
+        #    WSA init aside as wsainit - swap them back
+        init_mode = next(
+            (m for n, m, _s in CpioUtils.list_entries(initrd_path)
+             if n == "init"), None)
+        init_is_link = init_mode is not None and (init_mode & 0o170000) == 0o120000
+        if "wsainit" in present:
+            if init_mode is not None:
+                CpioUtils.delete_file(initrd_path, "init")
+                log("  removed /init" + (" (symlink)" if init_is_link else ""))
+            CpioUtils.rename_entry(initrd_path, "wsainit", "init")
+            log("  wsainit -> init")
+        elif init_is_link:
+            log("WARNING: wsainit missing and /init is a symlink -")
+            log("  cannot restore a bootable init, aborting (nothing removed)")
+            time.sleep(3)
+            window.request_close()
+            return
+        elif init_mode is not None:
+            log("  kept /init (real file present, wsainit missing)")
+        else:
+            log("  WARNING: no /init and no wsainit - nothing to restore")
+
+        # 2. the hook payload itself
+        hook_files = (
+            "lspinit",
+            "magiskinit",
+            "overlay.d/init.lsp.magisk.rc",
+            POSTFSDATA_ARCNAME,
+            "overlay.d/sbin/init-ld.xz",
+            "overlay.d/sbin/magisk.xz",
+            "overlay.d/sbin/stub.xz",
+            "overlay.d/sbin/uninstall.txt",
+        )
+        removed = 0
+        for name in hook_files:
+            if name in present:
+                CpioUtils.delete_file(initrd_path, name)
+                log(f"  removed /{name}")
+                removed += 1
+        if ".backup" in present:
+            CpioUtils.delete_tree(initrd_path, ".backup")
+            log("  removed /.backup/")
+            removed += 1
+
+        # 3. whatever is left under overlay.d/ (module images included) goes
+        #    with the hook - the directory only exists for it
+        remaining = {name for name, *_ in CpioUtils.scan_entries(initrd_path)}
+        leftovers = sorted(n for n in remaining
+                           if n == "overlay.d" or n.startswith("overlay.d/"))
+        for name in leftovers:
+            log(f"  removed /{name}")
+            removed += 1
+        if leftovers:
+            CpioUtils.delete_tree(initrd_path, "overlay.d")
+            log("  /overlay.d/ tree removed")
+
+        log(f"Magisk hook uninstalled ({removed} entries removed)")
+
+        if is_wsa_img:
+            log("Starting WSA...")
+            WSADetector.ensure_running()
+            time.sleep(15)
+        else:
+            log("Patch complete!")
+        time.sleep(1)
+        window.request_close()
+
 
 def _parse_into(args_list):
     if args_list is None:
@@ -7195,6 +7673,10 @@ Examples:
   {CLI_NAME} --list-of-boltware --user                    List apps in USER module only
   {CLI_NAME} --install-magisk-hook                         Install Magisk hook only
   {CLI_NAME} --repaire-magisk-hook                         Force rebuild Magisk hook (overrides existing)
+  {CLI_NAME} --uninstall-magisk-hook                       Remove Magisk hook (wsainit becomes /init)
+  {CLI_NAME} --install-twrp                                Install TWRP + set twrp_support=true
+  {CLI_NAME} --repair-twrp                                 Force re-inject TWRP payload + fix flags
+  {CLI_NAME} --uninstall-twrp                              Remove TWRP files + clear both flags
   {CLI_NAME} --gui                                         Open the initrd.img file manager GUI
   {CLI_NAME} --gui --path C:\\initrd.img                   Manage a specific file
   {CLI_NAME} --register-img                                Add .img -> Open with -> WSA IMG Manager
@@ -7236,6 +7718,15 @@ Examples:
     parser.add_argument("--repaire-magisk-hook", "--repair-magisk-hook",
                         action="store_true", dest="repair_magisk_hook",
                         help="Force rebuild of the Magisk hook, overriding an existing one")
+    parser.add_argument("--uninstall-magisk-hook", action="store_true",
+                        help="Remove the Magisk hook (wsainit is renamed back to /init)")
+    parser.add_argument("--install-twrp", action="store_true",
+                        help="Install TWRP recovery files and set twrp_support=true")
+    parser.add_argument("--repair-twrp", action="store_true",
+                        help="Force re-inject the TWRP payload and fix twrp_support")
+    parser.add_argument("--uninstall-twrp", action="store_true",
+                        help="Remove TWRP files and folders, set twrp_support=false "
+                             "and recovery_flag=false")
     parser.add_argument("--register-img", action="store_true",
                         help="Register .img files -> Open with -> WSA IMG Manager (Explorer)")
     parser.add_argument("--unregister-img", action="store_true",
@@ -7334,6 +7825,30 @@ Examples:
         _debug("Command: --install-magisk-hook")
         twrp = WSATWRP()
         twrp.install_magisk_hook(initrd_path=args.path)
+        return
+
+    if args.uninstall_magisk_hook:
+        _debug("Command: --uninstall-magisk-hook")
+        twrp = WSATWRP()
+        twrp.uninstall_magisk_hook(initrd_path=args.path)
+        return
+
+    if args.uninstall_twrp:
+        _debug("Command: --uninstall-twrp")
+        twrp = WSATWRP()
+        twrp.uninstall_twrp(initrd_path=args.path)
+        return
+
+    if args.repair_twrp:
+        _debug("Command: --repair-twrp")
+        twrp = WSATWRP()
+        twrp.repair_twrp(initrd_path=args.path)
+        return
+
+    if args.install_twrp:
+        _debug("Command: --install-twrp")
+        twrp = WSATWRP()
+        twrp.install_twrp(initrd_path=args.path)
         return
 
     inject_file, inject_folder, inject_7z = None, None, None

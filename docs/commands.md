@@ -14,6 +14,9 @@ Complete reference for all `twrp.exe` commands and options.
   - [--inject-folder](#--inject-folder)
   - [--enable-twrp](#--enable-twrp)
   - [--disable-twrp](#--disable-twrp)
+  - [--install-twrp](#--install-twrp)
+  - [--repair-twrp](#--repair-twrp)
+  - [--uninstall-twrp](#--uninstall-twrp)
   - [--path](#--path)
   - [--debug](#--debug)
   - [--gui](#--gui)
@@ -24,6 +27,7 @@ Complete reference for all `twrp.exe` commands and options.
   - [--uninstall-boltware](#--uninstall-boltware)
   - [--install-magisk-hook](#--install-magisk-hook)
   - [--repaire-magisk-hook](#--repaire-magisk-hook)
+  - [--uninstall-magisk-hook](#--uninstall-magisk-hook)
   - [--register-img / --unregister-img](#--register-img--unregister-img)
 - [The `into` Keyword](#the-into-keyword)
 - [Exit Codes](#exit-codes)
@@ -221,6 +225,11 @@ twrp.exe --enable-twrp
 2. Sets `recovery_flag` to `"true"`
 3. Writes the modified info.json back
 
+**Installed-check gate:** refuses to flip the flag (and leaves it untouched)
+when `twrp_support` is `false` (points at `--install-twrp`) or
+`twrp_missing()` is non-empty (lists what is missing, points at
+`--repair-twrp`).
+
 **Syntax:**
 
 ```cmd
@@ -264,6 +273,49 @@ twrp.exe --disable-twrp --path <initrd.img>
 :: Reboot WSA into Android
 adb reboot
 ```
+
+---
+
+### --install-twrp
+
+```cmd
+twrp.exe --install-twrp [--path <initrd.img>]
+```
+
+Injects `assets/twrp.7z` (via its `patch.json` map) and sets
+`twrp_support = "true"`, then reports whatever `twrp_missing()` still finds.
+Skips with `TWRP already installed, nothing to do` when the flag is set and
+nothing is missing. A placeholder payload logs `Payload skipped: …` while the
+flag is still flipped — fill `assets/twrp.7z` and run `--repair-twrp`.
+
+---
+
+### --repair-twrp
+
+```cmd
+twrp.exe --repair-twrp [--path <initrd.img>]
+```
+
+Force re-injection of the TWRP payload (`force=True`, same idea as
+`--repaire-magisk-hook`): the "already installed" short circuit is skipped,
+`twrp_support` is re-asserted `true` and the result is verified with
+`twrp_missing()`. Use it after `--enable-twrp` reports
+`TWRP install is incomplete`.
+
+---
+
+### --uninstall-twrp
+
+```cmd
+twrp.exe --uninstall-twrp [--path <initrd.img>]
+```
+
+Removes `/sbin/twrp`, `/sbin/busybox`, `/sbin/linker64` and the trees
+`/twres/`, `/etc/`, `/system/lib64/`; swaps a regular `/init` dispatcher back
+to the symlink `init -> lspinit` (when `lspinit` exists); sets
+`twrp_support = "false"` and `recovery_flag = "false"` (both transitions
+logged, ends with `TWRP uninstalled`). No-op with
+`TWRP is not installed - nothing to remove`. The Magisk hook is not touched.
 
 ---
 
@@ -398,6 +450,22 @@ twrp.exe --repaire-magisk-hook [--path <initrd.img>]    # alias: --repair-magisk
 
 Force a full rebuild from `fix.7z`, discarding the installed hook, then verify
 with `hook_issues()`. Full guide: [Magisk Hook](magisk-hook.md).
+
+---
+
+### --uninstall-magisk-hook
+
+```cmd
+twrp.exe --uninstall-magisk-hook [--path <initrd.img>]
+```
+
+Restores the stock boot chain: renames the saved WSA init back
+(`wsainit -> init`, aborting if it is missing while `/init` is a symlink),
+deletes the hook payload (`lspinit`, `magiskinit`, `post-fs-data.sh`,
+`init-ld.xz`, `magisk.xz`, `stub.xz`, `uninstall.txt`, `.backup/`) and
+removes the whole `overlay.d/` tree — module images included. Ends with
+`Magisk hook uninstalled (N entries removed)`; the TWRP flags are left
+untouched. Full guide: [Magisk Hook](magisk-hook.md).
 
 ---
 
