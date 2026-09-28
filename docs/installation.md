@@ -11,8 +11,11 @@ Step-by-step instructions for installing TWRP recovery into WSA.
 - [Inject TWRP](#inject-twrp)
 - [Enable TWRP Mode](#enable-twrp-mode)
 - [Verify Installation](#verify-installation)
+- [System Apps, Modules & Hook](#system-apps-modules--hook)
+- [IMG Manager & .img Open With](#img-manager--img-open-with)
 - [Reboot Back to Android](#reboot-back-to-android)
 - [Restore Original initrd.img](#restore-original-initrdimg)
+- [What's Next?](#whats-next)
 
 ---
 
@@ -27,6 +30,22 @@ Before installing TWRP for WSA, ensure you have:
 | Developer Mode | Enabled in WSA Settings → Developer |
 | ADB Debugging | Enabled in WSA Settings → Developer |
 | Administrator | Run terminal as administrator |
+| Python 3.10+ | Only when running from source (`python twrp.py …`) |
+| PySide6 6.5+ | Only for the IMG Manager (`twrp.py --gui`) |
+
+### Bundled tools
+
+Running from the repository (or a release zip that ships `assets/`) needs **no
+extra downloads** — the tool picks these up automatically:
+
+| Asset | Used for |
+|:------|:---------|
+| `assets/7z.exe` | extracting `twrp.7z` / `fix.7z` |
+| `assets/adb.exe` (+ `cygwin1.dll`) | ADB when it is not on `PATH` |
+| `assets/aaptpp.exe` | reading APK package names (`--install-as-system-app`) |
+| `assets/img-checker.exe`, `assets/img-creater.exe` | unpacking / repacking nested `.img` files |
+| `assets/icon.ico`, `assets/twrp.ico` | `.img` *Open with* icon (`--register-img`) |
+| `assets/fix.7z` | Magisk hook payload (`--install-magisk-hook`) |
 
 ### Install ADB (if not installed)
 
@@ -81,7 +100,8 @@ twrp.exe --inject twrp.7z
 1. Extracts `twrp.7z` to a temporary directory
 2. Reads `patch.json` to understand file mapping
 3. Locates WSA's `initrd.img` in the WSA installation directory
-4. Injects TWRP files into the cpio archive:
+4. Creates a backup `initrd.img.bak` next to the original
+5. Injects TWRP files into the cpio archive:
    - `/init` — Custom dispatcher ELF binary
    - `/info.json` — Metadata with recovery flag
    - `/sbin/twrp` — Main TWRP binary
@@ -160,6 +180,9 @@ Recovery Flag:     true
 TWRP Support:      true
 Amazon Support:    false
 Note:              TWRP Recovery enabled
+--- Module images ---
+admin:  lsp_wsa-installer.img       present
+user:   lsp_wsa-installer-user.img  present
 ```
 
 ### Check ADB
@@ -178,6 +201,78 @@ List of devices attached
 ```
 
 The `recovery` status confirms TWRP is active.
+
+---
+
+## System Apps, Modules & Hook
+
+Optional steps — every one of them defaults to the **USER** module image, so
+you can skip them entirely.
+
+### Install an APK as a system app
+
+```cmd
+twrp.exe --install-as-system-app app.apk            (USER module — no password)
+twrp.exe --install-as-system-app app.apk --admin    (ADMIN module — asks for the password)
+twrp.exe --update-as-system-app app.apk             (overwrite an existing system app)
+```
+
+The APK's package name is read with `assets/aaptpp.exe`, the old entry is
+replaced inside `lsp_wsa-installer[-user].img`, and a `*.img.bak-*` is written
+first. Details: [Admin & User Modules](admin-user-modules.md).
+
+### See what is pre-installed
+
+```cmd
+twrp.exe --list-of-boltware
+```
+
+Scans **both** module images and prints a de-duplicated list tagged `admin`
+or `user`.
+
+### Remove a system app on next boot
+
+```cmd
+twrp.exe --uninstall-boltware com.example.app
+```
+
+Adds the package to `uninstall.txt`; the boot hook applies it the next time
+Android starts. Details: [Boltware Manager](boltware-manager.md).
+
+### Install the boot hook
+
+```cmd
+twrp.exe --install-magisk-hook     # first-time install
+twrp.exe --repaire-magisk-hook     # force rebuild from assets/fix.7z
+```
+
+Audits come from `hook_issues()` — an empty result means the hook is healthy.
+Details: [Magisk Hook](magisk-hook.md).
+
+---
+
+## IMG Manager & .img Open With
+
+### Open the archive editor
+
+```cmd
+twrp.exe --gui
+```
+
+Browse `initrd.img` like a 7-Zip archive: extract, open nested
+cpio/tar/zip/7z/gz/xz/bz2 archives, edit scripts in place, stage changes and
+repack. Every save creates an `*.img.bak-YYYYMMDD-HHMMSS` backup with a
+restore picker. Details: [IMG Manager](img-manager.md).
+
+### Double-click `.img` files in Explorer
+
+```cmd
+twrp.exe --register-img      # .img -> Open with -> WSA IMG Manager
+twrp.exe --unregister-img    # remove the association (idempotent)
+```
+
+Written to HKLM when elevated, HKCU otherwise. Details:
+[Open With Registry](open-with-registry.md).
 
 ---
 
@@ -216,5 +311,12 @@ Then restart WSA. The dispatcher will read `recovery_flag: "false"` and boot And
 ## What's Next?
 
 - [CLI Commands Reference](commands.md) — Full list of all twrp.exe commands
+- [CLI Reference](cli-reference.md) — Every option, exit code and example
 - [Architecture](architecture.md) — How TWRP for WSA works internally
 - [Troubleshooting](troubleshooting.md) — Common issues and solutions
+- [Admin & User Modules](admin-user-modules.md) — Dual module images + password gate
+- [IMG Manager](img-manager.md) — `--gui` archive browser, Edit/Pack, backups
+- [Open With Registry](open-with-registry.md) — `.img` right-click integration
+- [Magisk Hook](magisk-hook.md) — Boot hook install / repair / audit
+- [Boltware Manager](boltware-manager.md) — List and remove system apps
+- [Boot Dispatcher](dispatcher.md) — `init.c` build and verification

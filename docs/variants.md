@@ -14,7 +14,10 @@ Documentation for all 7 custom WSA 2407.40000.4.0 image variants with TWRP Recov
 - [Variant 5 — Magisk Canary + GApps + NoAmazon](#variant-5--magisk-canary--gapps--noamazon)
 - [Variant 6 — Magisk Stable + NoGApps + NoAmazon](#variant-6--magisk-stable--nogapps--noamazon)
 - [Variant 7 — NoGApps + NoAmazon](#variant-7--nogapps--noamazon)
+- [Module Images — ADMIN / USER](#module-images--admin--user)
 - [Injection Order](#injection-order)
+- [Variant Comparison](#variant-comparison)
+- [TWRP Recovery in All Variants](#twrp-recovery-in-all-variants)
 
 ---
 
@@ -29,6 +32,11 @@ All variants are built from WSA **2407.40000.4.0** x64 Release-Nightly images an
 3. Save it as `info.json` in your working directory
 4. Run the inject command with the variant's image path
 5. Verify with the status command
+
+> **Modules:** anything that works on system apps or the boot hook also takes
+> `--user` (default, no password) or `--admin` (password-gated). Every variant
+> above carries both module images — see
+> [Module Images](#module-images--admin--user).
 
 ---
 
@@ -294,6 +302,47 @@ twrp.exe --status --path <initrd_path>
 
 ---
 
+## Module Images — ADMIN / USER
+
+These are not WSA variants — they are the **two extra module images** every
+variant can carry for system apps and the boot hook.
+
+| Mode | Image | Contents | Password |
+|:-----|:------|:---------|:---------|
+| ADMIN | `lsp_wsa-installer.img` | system apps, hook, `uninstall.txt` | required with `--admin` |
+| USER | `lsp_wsa-installer-user.img` | same layout, safe default | never |
+
+### Commands
+
+```cmd
+:: Status of both module images
+twrp.exe --status
+
+:: Install a system app into the USER module (default)
+twrp.exe --install-as-system-app app.apk
+
+:: Install into the ADMIN module (password prompt / WSA_ADMIN_PASSWORD)
+twrp.exe --install-as-system-app app.apk --admin
+
+:: Overwrite an app that is already installed
+twrp.exe --update-as-system-app app.apk --admin
+
+:: Inventory across both images (de-duplicated, admin/user tags)
+twrp.exe --list-of-boltware
+
+:: Schedule removal on the next Android boot
+twrp.exe --uninstall-boltware com.example.app
+
+:: Boot hook: install, audit, force-rebuild
+twrp.exe --install-magisk-hook
+twrp.exe --repaire-magisk-hook --admin
+```
+
+Details: [Admin & User Modules](admin-user-modules.md) ·
+[Boltware Manager](boltware-manager.md) · [Magisk Hook](magisk-hook.md)
+
+---
+
 ## Injection Order
 
 To inject all 7 variants:
@@ -353,6 +402,9 @@ All variants include TWRP Recovery with the same capabilities:
 - ADB sideload for installing packages
 - Terminal access for advanced operations
 - Partition management and formatting
+- System-app install / update / removal via the module images
+- IMG Manager (`twrp.exe --gui`) for editing the archive itself
+- `.img` *Open with* registration (`twrp.exe --register-img`)
 
 ### How It Works in WSA
 

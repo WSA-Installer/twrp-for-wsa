@@ -8,6 +8,7 @@ Complete list of WSA image variants supported by TWRP for WSA.
 
 - [Overview](#overview)
 - [Supported Variants](#supported-variants)
+- [Module Images (ADMIN / USER)](#module-images-admin--user)
 - [How to Check Your WSA Version](#how-to-check-your-wsa-version)
 - [Image Details](#image-details)
 - [Architecture Notes](#architecture-notes)
@@ -33,6 +34,31 @@ All variants use the same TWRP x86_64 binary, as WSA runs on x86_64 emulation on
 | 5 | Windows ARM64 | ARM64 | 2404.40000.10.0 | `microsoft.windows subsystem for android_2404.40000.10.0_neutral_~_8wekyb3d8bbwe.initrd.img` |
 | 6 | Windows ARM64 | ARM64 | 2406.40000.13.0 | `microsoft.windows subsystem for android_2406.40000.13.0_neutral_~_8wekyb3d8bbwe.initrd.img` |
 | 7 | Amazon Fire | x86_64 | 2404.40000.12.0 | `microsoft.windows subsystem for android_2404.40000.12.0_neutral_~_8wekyb3d8bbwe.initrd.img` |
+
+---
+
+## Module Images (ADMIN / USER)
+
+Independently of the 7 WSA variants above, this project maintains **two module
+images** injected next to the main initrd. They exist for every variant and
+are shown by `--status`:
+
+| Mode | Image | CPIO root entries | Default |
+|:-----|:------|:------------------|:--------|
+| ADMIN | `lsp_wsa-installer.img` | `wsa-installer`, `lsp_installer` | `--admin` |
+| USER | `lsp_wsa-installer-user.img` | `wsa-installer-user`, `lsp_installer_user` | `--user` / no flag |
+
+They carry system apps (`--install-as-system-app`, `--list-of-boltware`,
+`--uninstall-boltware`) and the boot hook (`--install-magisk-hook`). The ADMIN
+image additionally requires the SHA-256 password gate when opened with
+`--admin`.
+
+```cmd
+twrp.exe --status                 # both module images are reported
+twrp.exe --list-of-boltware       # packages inside both images
+```
+
+Details: [Admin & User Modules](admin-user-modules.md).
 
 ---
 
@@ -67,6 +93,11 @@ Output includes:
 
 ```
 WSA Version: 2404.40000.2.0
+Recovery Flag: true
+TWRP Support:  true
+--- Module images ---
+admin:  lsp_wsa-installer.img       present
+user:   lsp_wsa-installer-user.img  present
 ```
 
 ---
@@ -185,7 +216,12 @@ All variants use the same initrd.img structure:
 /twres/                  # TWRP theme resources
 /system/lib64/           # Android shared libraries
 /overlay.d/sbin/twrp     # TWRP binary location for dispatcher
+/overlay.d/sbin/post-fs-data.sh   # boot hook (uninstall.txt handler)
 ```
+
+Alongside the main initrd, the tool may also create the module images
+`lsp_wsa-installer.img` and `lsp_wsa-installer-user.img` in the same
+directory — see [Module Images](#module-images-admin--user).
 
 ### WSA Installation Path
 
@@ -207,4 +243,5 @@ When Microsoft releases a new WSA version:
 2. Verify it uses the same cpio format
 3. Test injection with `twrp.exe --inject twrp.7z`
 4. Verify TWRP boots with `twrp.exe --enable-twrp`
-5. Update this documentation with the new variant
+5. Check both module images still report under `twrp.exe --status`
+6. Update this documentation with the new variant

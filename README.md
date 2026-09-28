@@ -267,16 +267,21 @@ twrp.exe --enable-twrp --path D:\WSA\initrd.img
 flowchart TD
     A[WSA Kernel] --> B["/init (Dispatcher ELF)"]
     B --> C{Reads /info.json}
-    C -->|"recovery_flag: true"| D["exec /sbin/twrp"]
-    C -->|"recovery_flag: false"| E["exec /init_orig"]
+    C -->|"recovery_flag: true (case-insensitive)"| D["exec /sbin/twrp"]
+    C -->|"recovery_flag: false (case-insensitive)"| E{"access(/lspinit, X_OK)?"}
+    E -->|"present"| E2["exec /lspinit"]
+    E -->|"absent"| E3["exec /wsainit"]
     D --> F[TWRP Recovery Boots]
-    E --> G[Android Boots Normally]
+    E2 --> G[Android Boots Normally]
+    E3 --> G
 
     style A fill:#2d2d2d,stroke:#808080,color:#fff
     style B fill:#4a2d8c,stroke:#808080,color:#fff
     style C fill:#1a5276,stroke:#808080,color:#fff
     style D fill:#27ae60,stroke:#808080,color:#fff
     style E fill:#2980b9,stroke:#808080,color:#fff
+    style E2 fill:#2980b9,stroke:#808080,color:#fff
+    style E3 fill:#2980b9,stroke:#808080,color:#fff
     style F fill:#27ae60,stroke:#808080,color:#fff
     style G fill:#2980b9,stroke:#808080,color:#fff
 ```
@@ -302,8 +307,9 @@ flowchart TD
    - Dispatcher executes `/sbin/twrp`
    - TWRP recovery boots with full touch interface
 5. **If `recovery_flag` is `"false"` (case-insensitive):**
-   - Dispatcher executes `/init_orig` (saved original init)
-   - Android boots normally
+   - Dispatcher probes `/lspinit` with `access(X_OK)`
+   - `/lspinit` when present (GApps / Magisk images), `/wsainit` otherwise
+   - Android boots normally — the original init is never renamed
 
 ### Inject Flow
 
@@ -486,7 +492,7 @@ python twrp.py --enable-twrp
 
 The TWRP recovery image is built automatically from source:
 
-1. Go to [Actions](https://github.com/WSA-Installer/twrp-builder-wsa/actions)
+1. Go to [Actions](https://github.com/WSA-Installer/twrp-for-wsa/actions)
 2. Click **Build TWRP x86_64 for WSA**
 3. Click **Run workflow**
 4. Wait ~60 minutes

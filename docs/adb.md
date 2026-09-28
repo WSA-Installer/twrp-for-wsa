@@ -12,6 +12,8 @@ ADB (Android Debug Bridge) commands for working with TWRP recovery in WSA.
 - [Backup and Restore](#backup-and-restore)
 - [System Operations](#system-operations)
 - [Troubleshooting](#troubleshooting)
+- [ADB vs twrp.py](#adb-vs-twrppy)
+- [Common ADB Commands Reference](#common-adb-commands-reference)
 
 ---
 
@@ -257,6 +259,28 @@ adb connect 127.0.0.1:58526
 1. Ensure sufficient disk space
 2. Check file permissions
 3. Try a different location (`/data/local/tmp/`)
+
+---
+
+## ADB vs twrp.py
+
+These operations are **not** ADB work — they change the `initrd.img` on the
+Windows side and must be done with the CLI/GUI, not from an adb shell:
+
+| Goal | Use |
+|:-----|:----|
+| Install / update a system app | `twrp.exe --install-as-system-app app.apk [--admin]` |
+| List or remove system apps | `twrp.exe --list-of-boltware`, `--uninstall-boltware` |
+| Install or repair the boot hook | `twrp.exe --install-magisk-hook`, `--repaire-magisk-hook` |
+| Edit the archive itself | `twrp.exe --gui` (IMG Manager) |
+| Register `.img` in Explorer | `twrp.exe --register-img` |
+
+ADB is only needed to **observe** the result: `adb reboot` applies the hook's
+`uninstall.txt`, `adb devices` shows `recovery` while TWRP runs, and
+`adb shell pm list packages` confirms a package is gone.
+
+> `adb.py` does not exist in this project — the ADB integration lives inside
+> `twrp.py` (`adb_connected` state, `adb reboot` after injection).
 
 ---
 

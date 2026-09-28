@@ -6,7 +6,7 @@ Absolutely! Here are all **7 variants** with updated `twrp_support: "True"` and 
 
 **Image path**
 ```
-C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0.img
+$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0.img
 ```
 
 **info.json**
@@ -26,12 +26,12 @@ C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Rele
 
 **Inject**
 ```powershell
-venv\Scripts\python.exe twrp.py --inject-file "C:\Users\C Y B E R B U D D Y\Documents\info.json" --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0.img"
+venv\Scripts\python.exe twrp.py --inject-file "$env:USERPROFILE\Documents\info.json" --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0.img"
 ```
 
 **Verify**
 ```powershell
-venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0.img"
+venv\Scripts\python.exe twrp.py --status --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0.img"
 ```
 
 ---
@@ -40,7 +40,7 @@ venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Do
 
 **Image path**
 ```
-C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0-NoAmazon.img
+$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0-NoAmazon.img
 ```
 
 **info.json**
@@ -60,12 +60,12 @@ C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Rele
 
 **Inject**
 ```powershell
-venv\Scripts\python.exe twrp.py --inject-file "C:\Users\C Y B E R B U D D Y\Documents\info.json" --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --inject-file "$env:USERPROFILE\Documents\info.json" --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0-NoAmazon.img"
 ```
 
 **Verify**
 ```powershell
-venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --status --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0-NoAmazon.img"
 ```
 
 ---
@@ -74,7 +74,7 @@ venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Do
 
 **Image path**
 ```
-C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-GApps-13.0.img
+$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-GApps-13.0.img
 ```
 
 **info.json**
@@ -94,12 +94,12 @@ C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Rele
 
 **Inject**
 ```powershell
-venv\Scripts\python.exe twrp.py --inject-file "C:\Users\C Y B E R B U D D Y\Documents\info.json" --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-GApps-13.0.img"
+venv\Scripts\python.exe twrp.py --inject-file "$env:USERPROFILE\Documents\info.json" --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-GApps-13.0.img"
 ```
 
 **Verify**
 ```powershell
-venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-GApps-13.0.img"
+venv\Scripts\python.exe twrp.py --status --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-GApps-13.0.img"
 ```
 
 ---
@@ -108,7 +108,7 @@ venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Do
 
 **Image path**
 ```
-C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps.img
+$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps.img
 ```
 
 **info.json**
@@ -128,12 +128,12 @@ C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Rele
 
 **Inject**
 ```powershell
-venv\Scripts\python.exe twrp.py --inject-file "C:\Users\C Y B E R B U D D Y\Documents\info.json" --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps.img"
+venv\Scripts\python.exe twrp.py --inject-file "$env:USERPROFILE\Documents\info.json" --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps.img"
 ```
 
 **Verify**
 ```powershell
-venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps.img"
+venv\Scripts\python.exe twrp.py --status --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps.img"
 ```
 
 ---
@@ -142,7 +142,7 @@ venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Do
 
 **Image path**
 ```
-C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-canary-GApps-13.0-NoAmazon.img
+$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-canary-GApps-13.0-NoAmazon.img
 ```
 
 **info.json**
@@ -162,12 +162,12 @@ C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Rele
 
 **Inject**
 ```powershell
-venv\Scripts\python.exe twrp.py --inject-file "C:\Users\C Y B E R B U D D Y\Documents\info.json" --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-canary-GApps-13.0-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --inject-file "$env:USERPROFILE\Documents\info.json" --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-canary-GApps-13.0-NoAmazon.img"
 ```
 
 **Verify**
 ```powershell
-venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-canary-GApps-13.0-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --status --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-canary-GApps-13.0-NoAmazon.img"
 ```
 
 ---
@@ -176,7 +176,7 @@ venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Do
 
 **Image path**
 ```
-C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-NoGApps-NoAmazon.img
+$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-NoGApps-NoAmazon.img
 ```
 
 **info.json**
@@ -196,12 +196,12 @@ C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Rele
 
 **Inject**
 ```powershell
-venv\Scripts\python.exe twrp.py --inject-file "C:\Users\C Y B E R B U D D Y\Documents\info.json" --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-NoGApps-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --inject-file "$env:USERPROFILE\Documents\info.json" --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-NoGApps-NoAmazon.img"
 ```
 
 **Verify**
 ```powershell
-venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-NoGApps-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --status --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-NoGApps-NoAmazon.img"
 ```
 
 ---
@@ -210,7 +210,7 @@ venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Do
 
 **Image path**
 ```
-C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps-NoAmazon.img
+$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps-NoAmazon.img
 ```
 
 **info.json**
@@ -230,12 +230,12 @@ C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Rele
 
 **Inject**
 ```powershell
-venv\Scripts\python.exe twrp.py --inject-file "C:\Users\C Y B E R B U D D Y\Documents\info.json" --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --inject-file "$env:USERPROFILE\Documents\info.json" --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps-NoAmazon.img"
 ```
 
 **Verify**
 ```powershell
-venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --status --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps-NoAmazon.img"
 ```
 
 ---
@@ -243,35 +243,59 @@ venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Do
 ### Injection order for all 7
 
 ```powershell
-# Step 1: Copy each JSON to C:\Users\C Y B E R B U D D Y\Documents\info.json
+# Step 1: Copy each JSON to $env:USERPROFILE\Documents\info.json
 # Step 2: Run inject for each image
 # Step 3: Run status to verify TWRP Support: True
 
 # --- Variant 1: GApps Standard ---
-venv\Scripts\python.exe twrp.py --inject-file "C:\Users\C Y B E R B U D D Y\Documents\info.json" --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0.img"
-venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0.img"
+venv\Scripts\python.exe twrp.py --inject-file "$env:USERPROFILE\Documents\info.json" --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0.img"
+venv\Scripts\python.exe twrp.py --status --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0.img"
 
 # --- Variant 2: GApps + NoAmazon ---
-venv\Scripts\python.exe twrp.py --inject-file "C:\Users\C Y B E R B U D D Y\Documents\info.json" --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0-NoAmazon.img"
-venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --inject-file "$env:USERPROFILE\Documents\info.json" --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --status --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-GApps-13.0-NoAmazon.img"
 
 # --- Variant 3: Magisk Stable + GApps ---
-venv\Scripts\python.exe twrp.py --inject-file "C:\Users\C Y B E R B U D D Y\Documents\info.json" --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-GApps-13.0.img"
-venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-GApps-13.0.img"
+venv\Scripts\python.exe twrp.py --inject-file "$env:USERPROFILE\Documents\info.json" --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-GApps-13.0.img"
+venv\Scripts\python.exe twrp.py --status --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-GApps-13.0.img"
 
 # --- Variant 4: NoGApps ---
-venv\Scripts\python.exe twrp.py --inject-file "C:\Users\C Y B E R B U D D Y\Documents\info.json" --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps.img"
-venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps.img"
+venv\Scripts\python.exe twrp.py --inject-file "$env:USERPROFILE\Documents\info.json" --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps.img"
+venv\Scripts\python.exe twrp.py --status --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps.img"
 
 # --- Variant 5: Magisk Canary + GApps + NoAmazon ---
-venv\Scripts\python.exe twrp.py --inject-file "C:\Users\C Y B E R B U D D Y\Documents\info.json" --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-canary-GApps-13.0-NoAmazon.img"
-venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-canary-GApps-13.0-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --inject-file "$env:USERPROFILE\Documents\info.json" --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-canary-GApps-13.0-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --status --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-canary-GApps-13.0-NoAmazon.img"
 
 # --- Variant 6: Magisk Stable + NoGApps + NoAmazon ---
-venv\Scripts\python.exe twrp.py --inject-file "C:\Users\C Y B E R B U D D Y\Documents\info.json" --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-NoGApps-NoAmazon.img"
-venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-NoGApps-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --inject-file "$env:USERPROFILE\Documents\info.json" --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-NoGApps-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --status --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-with-magisk-30.6.30600.-stable-NoGApps-NoAmazon.img"
 
 # --- Variant 7: NoGApps + NoAmazon ---
-venv\Scripts\python.exe twrp.py --inject-file "C:\Users\C Y B E R B U D D Y\Documents\info.json" --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps-NoAmazon.img"
-venv\Scripts\python.exe twrp.py --status --path "C:\Users\C Y B E R B U D D Y\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --inject-file "$env:USERPROFILE\Documents\info.json" --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps-NoAmazon.img"
+venv\Scripts\python.exe twrp.py --status --path "$env:USERPROFILE\Downloads\initrd\initrd_WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps-NoAmazon.img"
 ```
+
+---
+
+### Module images (ADMIN / USER)
+
+The 7 variants above are WSA images. On top of each, system apps and the boot
+hook live in two **module images** created next to the initrd:
+
+```powershell
+# USER module is the default — no password
+venv\Scripts\python.exe twrp.py --install-as-system-app app.apk
+venv\Scripts\python.exe twrp.py --list-of-boltware
+venv\Scripts\python.exe twrp.py --uninstall-boltware com.example.app
+
+# ADMIN module — password gate (WSA_ADMIN_PASSWORD can override the prompt)
+venv\Scripts\python.exe twrp.py --install-as-system-app app.apk --admin
+venv\Scripts\python.exe twrp.py --repaire-magisk-hook --admin
+
+# Status reports both images
+venv\Scripts\python.exe twrp.py --status
+```
+
+See `docs/admin-user-modules.md`, `docs/boltware-manager.md` and
+`docs/magisk-hook.md`.

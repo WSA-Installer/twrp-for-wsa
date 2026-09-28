@@ -104,6 +104,20 @@ gh run watch   -R WSA-Installer/twrp-for-wsa
 gh run download -R WSA-Installer/twrp-for-wsa
 ```
 
+Verified first build — run
+[`36410185473`](https://github.com/WSA-Installer/twrp-for-wsa/actions/runs/36410185473)
+(`success`, 2026-09-28):
+
+| Property | Value |
+|---|---|
+| Command | `musl-gcc -static -Os -Wall -Wextra -Wno-comment -s -o init init.c` |
+| Warnings | 1 — `init.c:109: unused parameter 'buf'` (no `-Werror`) |
+| Output | `ELF 64-bit LSB executable, x86-64, statically linked, stripped` |
+| Size | 29,880 bytes |
+| sha256 | `cadae90db6816d2f06425f5c81f59c071fbb06196d3df5823fa8036083f07748` |
+| Artifact | `dispatcher-init` (`prebuilt/init`, `prebuilt/SHA256SUMS`) |
+| Commit | `a7ba885` — `ci: update prebuilt/init dispatcher binary` |
+
 ---
 
 ## Verifying a binary

@@ -98,26 +98,24 @@ extra file being created.
 ```mermaid
 flowchart TD
     A[WSA Kernel] --> B["/init (Dispatcher ELF)"]
-    B --> C[Reads /info.json]
-    C --> D{recovery_flag?}
-    D -->|"true (case-insensitive)"| E["exec /sbin/twrp"]
-    D -->|"false (case-insensitive)"| I{"access(/lspinit, X_OK)?"}
-    I -->|yes| F["exec /lspinit"]
-    I -->|no| F2["exec /wsainit"]
-    E --> G[TWRP Recovery Boots]
-    F --> H[Normal Android Boots]
-    F2 --> H
+    B --> C{Reads /info.json}
+    C -->|"recovery_flag: true (case-insensitive)"| D["exec /sbin/twrp"]
+    C -->|"recovery_flag: false (case-insensitive)"| E{"access(/lspinit, X_OK)?"}
+    E -->|"present"| E2["exec /lspinit"]
+    E -->|"absent"| E3["exec /wsainit"]
+    D --> F[TWRP Recovery Boots]
+    E2 --> G[Android Boots Normally]
+    E3 --> G
 
     style A fill:#2d2d2d,stroke:#808080,color:#fff
     style B fill:#4a2d8c,stroke:#808080,color:#fff
     style C fill:#1a5276,stroke:#808080,color:#fff
-    style D fill:#1a5276,stroke:#808080,color:#fff
-    style I fill:#1a5276,stroke:#808080,color:#fff
-    style E fill:#27ae60,stroke:#808080,color:#fff
-    style F fill:#2980b9,stroke:#808080,color:#fff
-    style F2 fill:#2980b9,stroke:#808080,color:#fff
-    style G fill:#27ae60,stroke:#808080,color:#fff
-    style H fill:#2980b9,stroke:#808080,color:#fff
+    style D fill:#27ae60,stroke:#808080,color:#fff
+    style E fill:#2980b9,stroke:#808080,color:#fff
+    style E2 fill:#2980b9,stroke:#808080,color:#fff
+    style E3 fill:#2980b9,stroke:#808080,color:#fff
+    style F fill:#27ae60,stroke:#808080,color:#fff
+    style G fill:#2980b9,stroke:#808080,color:#fff
 ```
 
 ---
@@ -286,7 +284,7 @@ flowchart TD
     style A fill:#4a2d8c,stroke:#808080,color:#fff
     style C fill:#1a5276,stroke:#808080,color:#fff
     style E fill:#1a5276,stroke:#808080,color:#fff
-    style G fill:#e67e22,stroke:#808080,color:#fff
+    style G fill:#2980b9,stroke:#808080,color:#fff
     style J fill:#27ae60,stroke:#808080,color:#fff
     style L fill:#27ae60,stroke:#808080,color:#fff
 ```

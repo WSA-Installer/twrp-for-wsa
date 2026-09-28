@@ -145,7 +145,7 @@ test: add unit tests for CpioUtils
 
 The TWRP recovery image is built automatically via GitHub Actions:
 
-1. Go to [Actions](https://github.com/WSA-Installer/twrp-builder-wsa/actions)
+1. Go to [Actions](https://github.com/WSA-Installer/twrp-for-wsa/actions)
 2. Click **Build TWRP x86_64 for WSA**
 3. Click **Run workflow**
 4. Wait ~60 minutes
