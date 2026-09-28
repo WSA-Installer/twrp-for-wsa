@@ -22,14 +22,16 @@ dialog before the main window exists.
 
 ---
 
-## The four dialogs
+## The dialogs
 
 | Class | Purpose |
 |---|---|
-| `ImgManagerWindow` | main frameless window: toolbar, multi-column multi-select tree, status line, persistent **no-backup warning** |
-| `ArchiveViewerDialog` | opens an archive that lives *inside* the image — **Extract → Edit → Pack** |
-| `NestedImgDialog` | an internal `.img` inside the archive (extract with `img-checker.exe`, repack with `img-creater.exe`) |
+| `ImgManagerWindow` | main frameless window: three toolbar rows, multi-column multi-select tree, status line, persistent **no-backup warning** |
+| `ArchiveViewerDialog` | opens an archive that lives *inside* the image — **Extract selected / Extract all → Edit → Pack** |
+| `NestedImgDialog` | an internal `.img` inside the archive (extract with `img-checker.exe`, repack with `img-creater.exe`) — also has **Extract selected / Extract all** |
 | `ScriptEditorDialog` | plain-text edit of a file entry with mode preservation |
+| `LogDialog` | scrolling transcript for one CLI operation (`Copy all` / `Save log…`), runs the operation on a worker thread |
+| `InfoDialog` | the same transcript shell, filled in one go — the **Info** report |
 
 ### Supported archive kinds
 
@@ -45,6 +47,28 @@ Rebuild helpers: `build_cpio_from_dir()`, `build_tar_from_dir()`,
 `build_zip_from_dir()` — each restores uid/gid 0, empty uname/gname, directory
 modes (`0o040750` class), symlinks and per-file permission bits
 (`_file_perms()` / `guess_mode()`).
+
+### Selective extraction (Extract selected / Extract all)
+
+Both viewers run on `QAbstractItemView.ExtendedSelection` trees, so Ctrl/Shift
+click (and Ctrl+A) pick the rows to write out:
+
+* `ArchiveViewerDialog._on_extract(selected_only)` — `_selected_names()` +
+  `_expand_names()` (a ticked **folder** pulls in every entry under it; 7-Zip
+  backslash paths and stdlib slash paths are both handled), then one backend:
+
+  | container | call |
+  |---|---|
+  | cpio | `CpioUtils.extract_to(path, dest, names)` — already name-aware |
+  | zip | `ZipFile.extractall(path=dest, members=names)` |
+  | tar | `TarFile.extractall(dest, members=names, filter="data")` |
+  | 7z | `7z x -o<dest> -y <archive> <name…>` (`_run()`) |
+
+* `_on_tree_menu()` — right-click **Extract selected…**, **Extract all…**,
+  **Select all**, **Invert selection**, **Clear selection**
+* `NestedImgDialog._on_extract()` — copies the ticked rows (or the whole
+  unpacked tree) out with `shutil.copytree` / `copy2`, reporting the file count
+* an empty selection explains itself instead of silently dumping the archive
 
 ### Extract → Edit → Pack flow
 
@@ -65,6 +89,63 @@ use. Everything happens in a temp folder.
 * `_after_history_change`, `_reset_history`, `_undo`, `_redo`
 * `_push_snapshot` / `_load_snapshot` keep a snapshot stack
 * `_update_dirty` tracks unsaved state; `closeEvent` warns on dirty exit
+
+---
+
+## CLI buttons (rows 2 and 3)
+
+Row 1 keeps the file operations (extract, delete, rename, overwrite, add,
+new folder, refresh + Undo/Redo). Two more rows expose every CLI argument that
+makes sense while an image is open — `_CLI_ACTIONS` drives the buttons and
+`_on_cli()` dispatches to `self._cli_<key>()`:
+
+| Row | Button | Handler | Runs |
+|---|---|---|---|
+| 2 | **Info** | `_cli_info()` | `_build_info_text()` in an `InfoDialog`: path, size, mtime, sha256, staged/backups state, cpio census (folders/files/symlinks + unpacked size), recovery system + `info.json`, Magisk hook state (`hook_issues()`), both module images, WSA path/running |
+| 2 | **Install as system app…** | `_cli_install_system_app(False)` | APK picker → `PermissionManagerWindow` per package → `_flow_install_system_app` |
+| 2 | **Update as system app…** | `_cli_install_system_app(True)` | same flow with `force_update=True` |
+| 2 | **☐ Admin** | `_admin_gate()` | password gate for the two buttons above |
+| 2 | **Enable TWRP** / **Disable TWRP** | `_cli_enable()` / `_cli_disable()` | `_flow_enable` / `_flow_disable` |
+| 2 | **Install hook** / **Repair hook** | `_cli_install_hook()` / `_cli_repair_hook()` | `_flow_install_magisk_hook(force=False/True)` |
+| 3 | **Status** | `_cli_status()` | `WSATWRP.status()` |
+| 3 | **List system apps** | `_cli_list_apps()` | `list_boltware()` (admin + user modules) |
+| 3 | **Uninstall system app…** | `_cli_uninstall_app()` | package-name prompt → `uninstall_boltware()` |
+| 3 | **Register .img** / **Unregister .img** | `_cli_register_img()` / `_cli_unregister_img()` | `register_img_handler()` / `unregister_img_handler()` |
+
+### How a button runs
+
+* `_flow_*` flows (`log, window, **args`) run on a worker thread through
+  `LogDialog.run_flow()` — **every line lands in the dialog and is echoed to
+  the terminal** by `LogDialog.log()`, the same `log()` contract
+  `WSATWRP._launch_gui()` uses
+* print-only CLI functions (`status`, `list_boltware`, `uninstall_boltware`,
+  `register_img_handler`, `unregister_img_handler`) go through
+  `LogDialog.run_printing()`, which swaps `sys.stdout` for a `_LineTee` that
+  forwards each complete line to the dialog + terminal
+* the dialog stays open after `request_close()` so the transcript can be read,
+  copied or saved; on close, `finished` → `_after_live_change()`
+
+### Admin tick
+
+1. tick **Admin**, press **Install/Update** → password prompt
+   (`QInputDialog`, `EchoMode.Password`), SHA-256 against
+   `ADMIN_PASSWORD_SHA256`; `WSA_ADMIN_PASSWORD` is honoured first
+2. right password → the flow runs with `mode="admin"` (the `_flow_*` never
+   re-asks, so the dialog prompt is the only one)
+3. wrong password → `ADMIN_PASSWORD_ATTEMPTS` (3) tries with a warning each
+   time; on the 3rd miss the tick is **unchecked and disabled for the session**
+   and the operation **proceeds as the USER module**
+4. cancelling the prompt runs nothing
+5. tick off → straight to `mode="user"`, no prompt
+
+### Live-image guard
+
+The buttons operate on the **live** image while this window edits a staged
+copy, so:
+
+* `_confirm_live()` warns before the run when the staging area is dirty
+* after the dialog closes, `_after_live_change()` hashes the live file and —
+  if it changed — offers to reload it (staged edits discarded)
 
 ---
 
@@ -95,8 +176,11 @@ copy /Y "C:\...\Tools\initrd.img.bak-20260928-101500" "C:\...\Tools\initrd.img"
   with standard Qt widgets inside
 * Multi-select tree with context menu (`_on_context_menu`), double-click open
   (`_on_double_click`), drag/size grip (`resizeEvent`, `_update_control_rects`)
-* Toolbar actions: open, refresh, add file, add folder, new folder, rename,
-  delete, extract, edit, apply, backup, restore (`_act_*`)
+* Toolbar rows: (1) open, refresh, add file, add folder, new folder, rename,
+  delete, extract, edit, apply, backup, restore (`_act_*`); (2) info, install /
+  update system app + Admin tick, enable / disable TWRP, install / repair hook;
+  (3) status, list / uninstall system app, register / unregister `.img`
+  (`_cli_*`)
 * `wheelEvent` / `_max_scroll` / `_hit` handle tree scrolling; `_fill`,
   `_refresh_buttons`, `_update_status` keep the chrome in sync
 * Keyboard: `keyPressEvent` (Enter opens, Delete removes, F5 refreshes)
@@ -107,7 +191,7 @@ copy /Y "C:\...\Tools\initrd.img.bak-20260928-101500" "C:\...\Tools\initrd.img"
 
 | Asset | Needed for |
 |---|---|
-| `assets/7z.exe` | 7z archives |
+| `assets/7z.exe` **and** `assets/7z.dll` | 7z archives (`7z.exe` alone cannot load its codec) |
 | `assets/img-checker.exe` | unpack internal `.img` |
 | `assets/img-creater.exe` | repack internal `.img` |
 | `assets/fix.7z` | Magisk hook rebuild (see [Magisk Hook](magisk-hook.md)) |
@@ -126,6 +210,7 @@ Missing `img-checker.exe` / `img-creater.exe` produce an explicit message:
 
 | Symptom | Cause / fix |
 |---|---|
+| `Codec Load Error: …\assets\7z.dll` when opening a 7z entry | `assets/7z.dll` is missing next to `7z.exe` — copy it back (the archive then falls back to an error dialog) |
 | `Not a readable cpio image: …` | not a cpio — try opening an archive entry inside it, or load a backup |
 | `Empty cpio image.` | truncated file; the backup picker opens automatically |
 | `img-creater.exe could not pack this image` | the unpacked tree changed shape (missing `./` entries) — re-extract |

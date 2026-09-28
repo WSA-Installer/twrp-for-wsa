@@ -19,9 +19,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `--register-img` / `--unregister-img` — register `.img` → *Open with* → **WSA IMG Manager** in Explorer (HKLM, HKCU fallback)
 - `prebuilt/init` — committed static ELF64 dispatcher binary + `prebuilt/SHA256SUMS`
 - `.github/workflows/build-dispatcher.yml` — dispatcher-only CI build (musl-gcc, artifact + checksum)
-- Bundled tools: `7z.exe`, `adb.exe`, `aaptpp.exe`, `img-checker.exe`, `img-creater.exe`, `cygwin1.dll`
+- Bundled tools: `7z.exe`, `7z.dll`, `adb.exe`, `aaptpp.exe`, `img-checker.exe`, `img-creater.exe`, `cygwin1.dll`
 - Icons: `icon.ico`, `twrp.ico`, `wsa_twrp_logo.png`
 - Six new docs: `admin-user-modules`, `img-manager`, `open-with-registry`, `magisk-hook`, `boltware-manager`, `dispatcher`
+- IMG Manager: **Extract selected** / **Extract all** in the archive viewer (multi-select tree, right-click *Select all / Invert / Clear*) and in the internal-image dialog — name-aware cpio, zip, tar and 7z extraction
+- IMG Manager toolbar rows 2–3: **Info**, **Install/Update as system app** (+ **Admin** tick), **Enable/Disable TWRP**, **Install/Repair hook**, **Status**, **List/Uninstall system app**, **Register/Unregister `.img`**
+- `LogDialog` — scrolling transcript (timestamped, `Copy all`, `Save log…`) that runs any `_flow_*` on a worker thread and echoes every line to the terminal; `InfoDialog` for the one-shot Info report
+- Admin tick: password prompt for Install/Update, `WSA_ADMIN_PASSWORD` override, 3 wrong attempts disable the tick for the session and the operation falls back to the user module
+- Live-image guard: `_confirm_live()` warns about unapplied staged edits, `_after_live_change()` offers to reload the image after a CLI run modified it
 
 ### Changed
 - `twrp.py` moved from `src/twrp.py` to the repository root

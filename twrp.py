@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QTreeWidget, QTreeWidgetItem, QMenu, QFileDialog,
     QInputDialog, QMessageBox, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
     QHeaderView, QAbstractItemView, QSizeGrip, QDialog, QPlainTextEdit,
+    QCheckBox, QLineEdit,
 )
 
 
@@ -3151,6 +3152,10 @@ class ArchiveViewerDialog(QDialog):
         self._tree.setUniformRowHeights(True)
         self._tree.setRootIsDecorated(False)
         self._tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        # multi-select: Ctrl/Shift to pick, Ctrl+A to take everything
+        self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_tree_menu)
         hdr = self._tree.header()
         hdr.setSectionResizeMode(0, QHeaderView.Stretch)
         for col in (1, 2):
@@ -3163,9 +3168,11 @@ class ArchiveViewerDialog(QDialog):
         row.addWidget(self._hint)
         row.addStretch(1)
         close_btn = QPushButton("Close")
-        self._extract_btn = QPushButton("Extract\u2026")
+        self._extract_sel_btn = QPushButton("Extract selected\u2026")
+        self._extract_all_btn = QPushButton("Extract all\u2026")
+        self._extract_btn = self._extract_all_btn
         self._edit_btn = QPushButton("Edit\u2026")
-        for btn in (self._extract_btn, self._edit_btn):
+        for btn in (self._extract_sel_btn, self._extract_all_btn, self._edit_btn):
             btn.setStyleSheet("""
                 QPushButton {
                     background: #1558b0; color: #ffffff;
@@ -3176,10 +3183,14 @@ class ArchiveViewerDialog(QDialog):
                 QPushButton:disabled { background: #1a1e27; color: #5b6272; border-color: #262b36; }
             """)
         close_btn.clicked.connect(self.reject)
-        self._extract_btn.clicked.connect(self._on_extract)
+        self._extract_sel_btn.clicked.connect(
+            lambda _checked=False: self._on_extract(True))
+        self._extract_all_btn.clicked.connect(
+            lambda _checked=False: self._on_extract(False))
         self._edit_btn.clicked.connect(self._on_edit)
         row.addWidget(close_btn)
-        row.addWidget(self._extract_btn)
+        row.addWidget(self._extract_sel_btn)
+        row.addWidget(self._extract_all_btn)
         row.addWidget(self._edit_btn)
         outer.addLayout(row)
 
@@ -3266,7 +3277,8 @@ class ArchiveViewerDialog(QDialog):
                 for name, mode, size in rows
                 if name.strip("/") and name.strip("/") != "TRAILER!!!"
             ]
-            self._extract = lambda dest, p=path: CpioUtils.extract_to(p, dest)
+            self._extract = lambda dest, names=None, p=path: CpioUtils.extract_to(
+                p, dest, names)
             self._container = "cpio"
             self._modes = {
                 name.strip("/"): mode for name, mode, size in rows
@@ -3279,7 +3291,12 @@ class ArchiveViewerDialog(QDialog):
             self._keepalive = zf
             self._entries = [(i.filename, i.file_size, i.is_dir())
                              for i in zf.infolist() if i.filename]
-            self._extract = zf.extractall
+            def _zip_extract(dest, names=None, _zf=zf):
+                if names:
+                    _zf.extractall(path=dest, members=list(names))
+                else:
+                    _zf.extractall(path=dest)
+            self._extract = _zip_extract
             self._container = "zip"
             # external_attr >> 16 is 0 on zips written by Windows tools;
             # _file_perms() then falls back to guess_mode(). Zip stores folder
@@ -3293,7 +3310,12 @@ class ArchiveViewerDialog(QDialog):
             self._keepalive = tf
             self._entries = [(m.name, m.size, m.isdir())
                              for m in tf.getmembers() if m.name]
-            self._extract = lambda dest: tf.extractall(dest, filter="data")
+            def _tar_extract(dest, names=None, _tf=tf):
+                if names:
+                    _tf.extractall(dest, members=names, filter="data")
+                else:
+                    _tf.extractall(dest, filter="data")
+            self._extract = _tar_extract
             self._container = "tar"
             # TarInfo.mode is only the permission bits; carry the type too
             self._modes = {
@@ -3347,9 +3369,12 @@ class ArchiveViewerDialog(QDialog):
             if not entries:
                 raise ValueError("7z listed no entries for this archive.")
             self._entries = [(e["name"], e["size"], e["dir"]) for e in entries]
-            def _run(dest, p=path):
+            def _run(dest, p=path, names=None):
+                argv = [SEVEN_ZIP, "x", f"-o{dest}", "-y", p]
+                if names:
+                    argv.extend(names)
                 proc = subprocess.run(
-                    [SEVEN_ZIP, "x", f"-o{dest}", "-y", p],
+                    argv,
                     capture_output=True, encoding="utf-8", errors="replace",
                     creationflags=CREATE_NO_WINDOW, timeout=600)
                 if proc.returncode != 0:
@@ -3362,7 +3387,8 @@ class ArchiveViewerDialog(QDialog):
     def _fill(self):
         if self._error:
             self._header.setText(self._error)
-            self._extract_btn.setEnabled(False)
+            self._extract_sel_btn.setEnabled(False)
+            self._extract_all_btn.setEnabled(False)
             self._edit_btn.setEnabled(False)
             return
         via = "  \u00b7  via 7-Zip" if self._used_7z else ""
@@ -3377,14 +3403,16 @@ class ArchiveViewerDialog(QDialog):
             ])
             self._tree.addTopLevelItem(item)
         can_edit = self.editable()
-        self._extract_btn.setEnabled(bool(self._entries))
+        self._extract_sel_btn.setEnabled(bool(self._entries))
+        self._extract_all_btn.setEnabled(bool(self._entries))
         self._edit_btn.setEnabled(can_edit)
         if can_edit:
             self._hint.setText(
                 "Edits go to the staged image \u00b7 press Apply to write it")
         else:
             self._hint.setText(
-                "Read-only preview \u00b7 extraction writes outside the image")
+                "Read-only preview \u00b7 select entries to extract only those "
+                "(Ctrl+A selects all)")
 
     def _rebuild_from_dir(self, src_dir):
         """container bytes for an edited tree, then re-wrap in every layer
@@ -3433,18 +3461,91 @@ class ArchiveViewerDialog(QDialog):
         self._packed = packed
         self.accept()
 
-    def _on_extract(self):
+    def _selected_names(self):
+        """Top-level entry names currently ticked in the tree (order kept)."""
+        out = []
+        for item in self._tree.selectedItems():
+            name = item.text(0)
+            if name and name not in out:
+                out.append(name)
+        return out
+
+    def _expand_names(self, names):
+        """Selecting a folder pulls in every entry stored beneath it."""
+        expanded = []
+        for name in names:
+            if name not in expanded:
+                expanded.append(name)
+            # 7-Zip reports paths with backslashes, stdlib archives with
+            # slashes -- a folder row must swallow children either way.
+            base = name.rstrip("/\\")
+            prefixes = (base + "/", base + "\\")
+            for entry, _size, _is_dir in self._entries:
+                if entry not in expanded and any(
+                        entry.startswith(prefix) for prefix in prefixes):
+                    expanded.append(entry)
+        return expanded
+
+    def _on_extract(self, selected_only=False):
         if not self._extract:
             return
+        names = None
+        if selected_only:
+            picked = self._selected_names()
+            if not picked:
+                QMessageBox.information(
+                    self, "IMG Manager",
+                    "Nothing selected.\n\nCtrl+Click or Shift+Click entries "
+                    "first (Ctrl+A selects everything).")
+                return
+            names = self._expand_names(picked)
         dest = QFileDialog.getExistingDirectory(self, "Extract to folder")
         if not dest:
             return
         try:
-            self._extract(dest)
+            result = self._extract(dest, names=names) if names is not None \
+                else self._extract(dest)
         except Exception as exc:
             QMessageBox.warning(self, "IMG Manager", f"Extract failed:\n{exc}")
             return
-        QMessageBox.information(self, "IMG Manager", f"Extracted to:\n{dest}")
+        if isinstance(result, int) and result:
+            how = f"Extracted {result} entries"
+        else:
+            how = f"Extracted {len(names) if names else len(self._entries)} entries"
+        QMessageBox.information(self, "IMG Manager", f"{how} to:\n{dest}")
+
+    def _on_tree_menu(self, pos):
+        """Right-click: extract just the selection, everything, or select all."""
+        item = self._tree.itemAt(pos)
+        if item is not None and not item.isSelected():
+            self._tree.clearSelection()
+            self._tree.setCurrentItem(item)
+            item.setSelected(True)
+        has_entries = bool(self._entries) and not self._error
+        has_sel = bool(self._selected_names())
+        menu = QMenu(self)
+        act_sel = menu.addAction("Extract selected\u2026")
+        act_all = menu.addAction("Extract all\u2026")
+        act_sel.setEnabled(has_entries and has_sel)
+        act_all.setEnabled(has_entries)
+        menu.addSeparator()
+        act_a = menu.addAction("Select all\tCtrl+A")
+        act_i = menu.addAction("Invert selection")
+        act_c = menu.addAction("Clear selection")
+        act_a.setEnabled(has_entries)
+        act_i.setEnabled(has_entries)
+        act_c.setEnabled(has_sel)
+        chosen = menu.exec(self._tree.viewport().mapToGlobal(pos))
+        if chosen is act_sel:
+            self._on_extract(True)
+        elif chosen is act_all:
+            self._on_extract(False)
+        elif chosen is act_a:
+            self._tree.selectAll()
+        elif chosen is act_i:
+            self._tree.invertSelection()
+        elif chosen is act_c:
+            self._tree.clearSelection()
 
     def closeEvent(self, event):
         super().closeEvent(event)
@@ -3555,6 +3656,10 @@ class NestedImgDialog(QDialog):
         row1.setSpacing(6)
         for label, slot in (
                 ("Open", self._on_open),
+                ("Extract selected\u2026",
+                 lambda: self._on_extract(True)),
+                ("Extract all\u2026",
+                 lambda: self._on_extract(False)),
                 ("Add File\u2026", self._on_add_file),
                 ("Add Folder\u2026", self._on_add_folder),
                 ("New Folder", self._on_new_folder),
@@ -3702,6 +3807,54 @@ class NestedImgDialog(QDialog):
             return self._src
         first = picked[0]
         return first["path"] if first["dir"] else os.path.dirname(first["path"])
+
+    # ------------------------------------------------------------------ extract
+
+    @staticmethod
+    def _count_files(root):
+        total = 0
+        for _dirpath, _dirnames, filenames in os.walk(root):
+            total += len(filenames)
+        return total
+
+    def _on_extract(self, selected_only=False):
+        """Copy the tree (or just the ticked entries) out to a real folder."""
+        if self._error:
+            return
+        if selected_only:
+            picked = self._selected_paths()
+            if not picked:
+                self._info("Nothing selected.\n\nCtrl+Click or Shift+Click "
+                           "entries first (Ctrl+A selects everything).")
+                return
+        else:
+            picked = None
+        dest = QFileDialog.getExistingDirectory(self, "Extract to folder")
+        if not dest:
+            return
+        count = 0
+        try:
+            if picked is None:
+                os.makedirs(dest, exist_ok=True)
+                count = self._count_files(self._src)
+                shutil.copytree(self._src, dest, dirs_exist_ok=True)
+            else:
+                for entry in picked:
+                    target = (os.path.join(dest, *entry["rel"].split("/"))
+                              if entry["rel"] else dest)
+                    if entry["dir"]:
+                        if os.path.isdir(entry["path"]):
+                            count += self._count_files(entry["path"])
+                            shutil.copytree(entry["path"], target,
+                                            dirs_exist_ok=True)
+                    else:
+                        os.makedirs(os.path.dirname(target) or dest, exist_ok=True)
+                        shutil.copy2(entry["path"], target)
+                        count += 1
+        except Exception as exc:
+            self._err(f"Extract failed:\n{exc}")
+            return
+        self._info(f"Extracted {count} entries to:\n{dest}")
 
     # -------------------------------------------------------------- actions
 
@@ -3908,6 +4061,254 @@ class NestedImgDialog(QDialog):
             self._work = None
 
 
+class LogSignals(QObject):
+    log_updated = Signal(str)
+    close_requested = Signal()
+
+
+class _LineTee:
+    """sys.stdout stand-in used while a printing CLI function runs.
+
+    Buffers partial writes and forwards every completed line to `sink`, so the
+    transcript reaches the log window and, through it, the real terminal.
+    """
+
+    def __init__(self, sink):
+        self._sink = sink
+        self._buf = ""
+
+    def write(self, text):
+        self._buf += str(text)
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line.strip():
+                self._sink(line.rstrip())
+        return len(text)
+
+    def flush(self):
+        if self._buf.strip():
+            self._sink(self._buf.rstrip())
+        self._buf = ""
+
+    def isatty(self):
+        return False
+
+    def fileno(self):
+        try:
+            return sys.__stdout__.fileno()
+        except Exception:
+            raise io.UnsupportedOperation("fileno")
+
+    @property
+    def encoding(self):
+        return "utf-8"
+
+
+class LogDialog(QDialog):
+    """Scrolling transcript of one CLI operation.
+
+    Same contract as RecoveryWindow -- update_log(msg) / request_close() -- so
+    every existing _flow_* runs here unchanged, but the whole log stays on
+    screen (Copy / Save log) while the caller's log() echoes it to the terminal.
+    """
+
+    _STYLE = """
+        QDialog { background: #171a21; color: #e6e9ef; }
+        QLabel { background: transparent; color: #e6e9ef;
+                 font-size: 13px; font-weight: bold; }
+        QPlainTextEdit {
+            background: #12151c; color: #d7dce6; border: 1px solid #2b3242;
+            border-radius: 6px; outline: 0; selection-background-color: #2f5f9e;
+        }
+        QPushButton {
+            background: #232838; color: #e6e9ef;
+            border: 1px solid #3a4150; border-radius: 5px;
+            padding: 5px 14px; font-size: 12px;
+        }
+        QPushButton:hover { background: #2c3346; border-color: #5a6478; }
+        QPushButton:pressed { background: #1b2030; }
+        QPushButton:disabled { background: #1a1e27; color: #5b6272;
+                               border-color: #262b36; }
+    """
+
+    def __init__(self, title="Working", parent=None):
+        super().__init__(parent)
+        self._title = title
+        self.setWindowTitle(title)
+        self.setStyleSheet(self._STYLE)
+        self.resize(780, 470)
+        self.setMinimumSize(520, 320)
+        self._finished = False
+        # the real terminal, captured before anything redirects stdout
+        self._real_out = sys.__stdout__
+        self._signals = LogSignals()
+        self._signals.log_updated.connect(self._append)
+        self._signals.close_requested.connect(self._finish)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(8)
+        self._head = QLabel(title)
+        outer.addWidget(self._head)
+
+        self._text = QPlainTextEdit()
+        self._text.setReadOnly(True)
+        self._text.setMaximumBlockCount(20000)
+        self._text.setLineWrapMode(QPlainTextEdit.NoWrap)
+        mono = QFont("Consolas", 10)
+        mono.setStyleHint(QFont.Monospace)
+        self._text.setFont(mono)
+        outer.addWidget(self._text, 1)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        for label, slot in (("Copy all", self._copy_all),
+                            ("Save log\u2026", self._save_log)):
+            btn = QPushButton(label)
+            btn.setFixedHeight(28)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFocusPolicy(Qt.NoFocus)
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
+        row.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.setFixedHeight(28)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setFocusPolicy(Qt.NoFocus)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background: #1558b0; color: #ffffff;
+                border: 1px solid #2f7ad6; border-radius: 5px;
+                padding: 5px 18px; font-weight: bold;
+            }
+            QPushButton:hover { background: #1a67ca; }
+        """)
+        close_btn.clicked.connect(self.reject)
+        row.addWidget(close_btn)
+        outer.addLayout(row)
+
+    # ------------------------------------------------------- worker-facing API
+
+    def log(self, msg):
+        """The `log` callable handed to every _flow_* (also hits the terminal)."""
+        text = str(msg)
+        try:
+            print(f"  {text}", file=self._real_out, flush=True)
+        except Exception:
+            pass
+        self.update_log(text)
+
+    def update_log(self, msg):
+        try:
+            self._signals.log_updated.emit(str(msg))
+        except RuntimeError:
+            pass  # the dialog is already gone
+
+    def request_close(self):
+        try:
+            self._signals.close_requested.emit()
+        except RuntimeError:
+            pass
+
+    # ------------------------------------------------------------------ slots
+
+    def _append(self, msg):
+        stamp = time.strftime("%H:%M:%S")
+        self._text.appendPlainText(f"[{stamp}] {msg}" if msg else "")
+        bar = self._text.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _finish(self):
+        if self._finished:
+            return
+        self._finished = True
+        self._text.appendPlainText("")
+        self._text.appendPlainText(
+            f"[{time.strftime('%H:%M:%S')}] finished \u2014 you can copy or "
+            "save this log, then close the window")
+        self._head.setText(f"{self._title}  \u2014  finished")
+        self.setWindowTitle(f"{self._title} \u2014 finished")
+
+    def finished_run(self):
+        return self._finished
+
+    # ---------------------------------------------------------------- actions
+
+    def _copy_all(self):
+        QApplication.clipboard().setText(self._text.toPlainText())
+        self._head.setText(f"{self._title}  \u2014  copied to clipboard")
+
+    def _save_log(self):
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Save log", "twrp-log.txt",
+            "Text files (*.txt);;All files (*.*)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(self._text.toPlainText())
+        except OSError as exc:
+            QMessageBox.warning(self, "IMG Manager", f"Save failed:\n{exc}")
+            return
+        self._head.setText(f"{self._title}  \u2014  saved: {path}")
+
+    # ---------------------------------------------------------------- runners
+
+    def run_flow(self, flow_func, flow_args=None):
+        """Start a (log, window, **args) flow on a worker thread."""
+        kwargs = dict(flow_args or {})
+
+        def worker():
+            try:
+                flow_func(self.log, self, **kwargs)
+            except Exception as exc:
+                try:
+                    print(f"  ERROR: {exc}", flush=True)
+                except Exception:
+                    pass
+                self.update_log(f"Error: {exc}")
+            finally:
+                self.request_close()
+
+        threading.Thread(target=worker, daemon=True).start()
+        return self
+
+    def run_printing(self, func, args=None):
+        """Run a CLI function that only prints(); replay its output line by
+        line into this dialog and the terminal."""
+        kwargs = dict(args or {})
+
+        def worker():
+            previous = sys.stdout
+            sys.stdout = _LineTee(self.log)
+            try:
+                func(**kwargs)
+            except Exception as exc:
+                self.log(f"Error: {exc}")
+            finally:
+                try:
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+                sys.stdout = previous
+                self.request_close()
+
+        threading.Thread(target=worker, daemon=True).start()
+        return self
+
+
+class InfoDialog(LogDialog):
+    """The same transcript shell, filled in one go instead of streamed."""
+
+    def __init__(self, title, text, parent=None):
+        super().__init__(title, parent)
+        self._text.setPlainText(text)
+        self._head.setText(title)
+
+    def _finish(self):
+        self._finished = True
+
+
 class ImgManagerWindow(QWidget):
     """7-Zip style manager for the initrd.img cpio archive.
 
@@ -3933,6 +4334,23 @@ class ImgManagerWindow(QWidget):
         ("add_folder", "Add Folder"),
         ("new_folder", "New Folder"),
         ("refresh", "Refresh"),
+    )
+
+    # Every CLI argument that makes sense while an image is open, in the order
+    # the two extra toolbar rows show them. Each key maps to self._cli_<key>().
+    _CLI_ACTIONS = (
+        ("info", "Info"),
+        ("install_app", "Install as system app\u2026"),
+        ("update_app", "Update as system app\u2026"),
+        ("enable", "Enable TWRP"),
+        ("disable", "Disable TWRP"),
+        ("install_hook", "Install hook"),
+        ("repair_hook", "Repair hook"),
+        ("status", "Status"),
+        ("list_apps", "List system apps"),
+        ("uninstall_app", "Uninstall system app\u2026"),
+        ("register_img", "Register .img"),
+        ("unregister_img", "Unregister .img"),
     )
 
     _BTN_STYLE = """
@@ -4007,6 +4425,8 @@ class ImgManagerWindow(QWidget):
             self._stage_dir, os.path.basename(initrd_path) or "initrd.img")
         shutil.copy2(source_path or initrd_path, self._path)
         self._mgr = InitrdManager(self._path)
+        # the CLI/flow engine the extra toolbar buttons drive
+        self._twrp = WSATWRP()
         self._hist_dir = os.path.join(self._stage_dir, "history")
         os.makedirs(self._hist_dir, exist_ok=True)
         self._hist = []
@@ -4028,6 +4448,7 @@ class ImgManagerWindow(QWidget):
         self._restore_btn = None
         self._btn_backup = None
         self._apply_btn = None
+        self._admin_cb = None
         self._base_title = f"IMG Manager  \u2014  {os.path.basename(initrd_path)}"
         self._title_text = self._base_title
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
@@ -4076,6 +4497,41 @@ class ImgManagerWindow(QWidget):
         self._redo_btn.clicked.connect(self._redo)
         row.addWidget(self._redo_btn)
         outer.addLayout(row)
+
+        # row 2 -- image info, system-app install/update (+ Admin tick) and the
+        # two TWRP switches / hook buttons that used to be CLI-only
+        cli = dict(self._CLI_ACTIONS)
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        for key in ("info", "install_app", "update_app"):
+            row2.addWidget(self._cli_button(cli[key], key))
+
+        self._admin_cb = QCheckBox("Admin")
+        self._admin_cb.setStyleSheet(
+            "QCheckBox { background: transparent; color: #e0a030; "
+            "font-size: 12px; font-weight: bold; spacing: 5px; }"
+            "QCheckBox::indicator { width: 15px; height: 15px; }")
+        self._admin_cb.setToolTip(
+            "Install / Update as system app into the ADMIN module.\n"
+            f"Needs the password; {ADMIN_PASSWORD_ATTEMPTS} wrong tries "
+            "disable the tick for this session and the operation then runs "
+            "as the USER module.")
+        self._admin_cb.setCursor(Qt.PointingHandCursor)
+        row2.addWidget(self._admin_cb)
+        row2.addStretch(1)
+        for key in ("enable", "disable", "install_hook", "repair_hook"):
+            row2.addWidget(self._cli_button(cli[key], key))
+        outer.addLayout(row2)
+
+        # row 3 -- status, system-app listing/removal and the .img handlers
+        row3 = QHBoxLayout()
+        row3.setSpacing(6)
+        for key in ("status", "list_apps", "uninstall_app"):
+            row3.addWidget(self._cli_button(cli[key], key))
+        row3.addStretch(1)
+        for key in ("register_img", "unregister_img"):
+            row3.addWidget(self._cli_button(cli[key], key))
+        outer.addLayout(row3)
 
         self._tree = QTreeWidget()
         self._tree.setColumnCount(5)
@@ -4574,6 +5030,354 @@ class ImgManagerWindow(QWidget):
             if action_key == key:
                 getattr(self, f"_act_{key}")()
                 return
+
+    # -------------------------------------------------------- CLI buttons
+
+    def _cli_button(self, label, key):
+        """Toolbar button for one _CLI_ACTIONS entry."""
+        btn = QPushButton(label)
+        btn.setFixedHeight(28)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFocusPolicy(Qt.NoFocus)
+        btn.setStyleSheet(self._BTN_STYLE)
+        btn.clicked.connect(lambda _checked=False, k=key: self._on_cli(k))
+        return btn
+
+    def _on_cli(self, key):
+        handler = getattr(self, f"_cli_{key}", None)
+        if handler is not None:
+            handler()
+
+    def _confirm_live(self, what):
+        """CLI operations write the LIVE image, not this window's staging."""
+        if self._dirty and not self._confirm(
+                f"You have unapplied staged edits.\n"
+                f"Operations that {what} write the LIVE image \u2014 applying "
+                "your staged edits afterwards would overwrite that work.\n\n"
+                "Continue anyway?"):
+            return False
+        return True
+
+    def _after_live_change(self):
+        """A CLI run may have rewritten the live image behind our back."""
+        new_hash = self._file_hash(self._real_path)
+        if new_hash is None or new_hash == self._real_hash:
+            return
+        if not self._confirm(
+                "The live image changed on disk.\n"
+                "Reload it into this window (your staged edits are discarded)?"):
+            self._last_action = "live image changed on disk (not reloaded)"
+            self._update_status()
+            return
+        try:
+            shutil.copy2(self._real_path, self._path)
+        except OSError as exc:
+            self._err(f"Reload failed:\n{exc}")
+            return
+        self._mgr = InitrdManager(self._path)
+        self._real_hash = new_hash
+        self._reset_history()
+        self._reload()
+        self._last_action = "reloaded from disk"
+        self._update_status()
+
+    def _admin_gate(self):
+        """Password check for the Admin tick.
+
+        Returns "admin" (tick + right password), "user" (tick off, or the
+        password failed ADMIN_PASSWORD_ATTEMPTS times and the tick is now
+        disabled) or None (the user cancelled -- run nothing)."""
+        if not self._admin_cb.isChecked():
+            return "user"
+        env = os.environ.get("WSA_ADMIN_PASSWORD", "")
+        if env and hashlib.sha256(
+                env.encode("utf-8")).hexdigest() == ADMIN_PASSWORD_SHA256:
+            self._last_action = "admin password accepted (WSA_ADMIN_PASSWORD)"
+            self._update_status()
+            return "admin"
+        for attempt in range(1, ADMIN_PASSWORD_ATTEMPTS + 1):
+            text, ok = QInputDialog.getText(
+                self, "Admin password",
+                f"Password for the admin module "
+                f"(attempt {attempt} of {ADMIN_PASSWORD_ATTEMPTS}):",
+                QLineEdit.EchoMode.Password)
+            if not ok:
+                return None
+            if hashlib.sha256(
+                    (text or "").encode("utf-8")).hexdigest() == ADMIN_PASSWORD_SHA256:
+                return "admin"
+            QMessageBox.warning(
+                self, "Admin password",
+                f"Wrong password ({attempt}/{ADMIN_PASSWORD_ATTEMPTS}).")
+        # three misses: drop the tick and carry on as the user module
+        self._admin_cb.setChecked(False)
+        self._admin_cb.setEnabled(False)
+        self._admin_cb.setToolTip(
+            f"Disabled after {ADMIN_PASSWORD_ATTEMPTS} wrong passwords \u2014 "
+            "this session runs as the user module.")
+        QMessageBox.information(
+            self, "Admin password",
+            f"{ADMIN_PASSWORD_ATTEMPTS} wrong passwords.\n\nThe Admin tick is "
+            "now disabled for this session and the operation runs as the "
+            "USER module.")
+        return "user"
+
+    @staticmethod
+    def _default_profile():
+        """Same fallback the CLI uses when no permission window is answered."""
+        return {
+            "hide_uninstall": True,
+            "hide_disable": True,
+            "privapp_perms": sorted(PRIVILEGED_PERMS),
+            "runtime_perms": list(DANGEROUS_PERMS) + list(SPECIAL_PERMS),
+            "fixed_runtime_perms": list(DANGEROUS_PERMS) + list(SPECIAL_PERMS),
+        }
+
+    def _collect_profiles(self, apk_paths):
+        """One PermissionManagerWindow per APK, exactly like the CLI."""
+        profiles = {}
+        for apk_path in apk_paths:
+            try:
+                info = ApkAnalyzer.get_all_info(apk_path)
+            except Exception as exc:
+                self._err(f"Cannot read {os.path.basename(apk_path)}:\n{exc}")
+                return None
+            box = [None]
+            dlg = PermissionManagerWindow(
+                package_name=info["package"], app_label=info["label"],
+                parent=self)
+            dlg._signals.result_ready.connect(
+                lambda r, b=box: b.__setitem__(0, r))
+            dlg.exec()
+            profile = box[0]
+            profiles[info["package"]] = profile if profile is not None \
+                else self._default_profile()
+        return profiles
+
+    def _cli_info(self):
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            text = self._build_info_text()
+        finally:
+            QApplication.restoreOverrideCursor()
+        dlg = InfoDialog(
+            f"IMG Info \u2014 {os.path.basename(self._real_path)}", text, self)
+        dlg.exec()
+
+    def _build_info_text(self):
+        """Full report for the live image: file facts, cpio census, recovery
+        state, hook state, module images and WSA detection."""
+        path = self._real_path
+        lines = []
+
+        def add(text=""):
+            lines.append(text)
+
+        add(f"File: {path}")
+        try:
+            size = os.path.getsize(path)
+            add(f"Size: {size:,} bytes ({self._fmt_size(size)})")
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S",
+                                  time.localtime(os.path.getmtime(path)))
+            add(f"Modified: {stamp}")
+        except OSError as exc:
+            add(f"Stat failed: {exc}")
+        add(f"SHA-256: {self._file_hash(path) or 'unavailable'}")
+        add(f"Staged copy: {'differs (not applied)' if self._dirty else 'in sync'}")
+        backups = self._backup_files()
+        add(f"Backups: {len(backups)}" + (f" (latest {backups[-1]})" if backups else ""))
+        add()
+
+        try:
+            rows = CpioUtils.list_entries(path)
+        except Exception as exc:
+            add(f"Format: not a readable cpio image ({exc})")
+            return "\n".join(lines)
+
+        n_dirs = n_files = n_links = 0
+        unpacked = 0
+        for _name, mode, size in rows:
+            kind = mode & 0o170000
+            if kind == 0o040000:
+                n_dirs += 1
+            elif kind == 0o120000:
+                n_links += 1
+            else:
+                n_files += 1
+                unpacked += size
+        add("Format: cpio (newc)")
+        add(f"Entries: {len(rows):,} "
+            f"({n_dirs:,} folders \u00b7 {n_files:,} files \u00b7 {n_links:,} symlinks)")
+        add(f"Unpacked size: {unpacked:,} bytes ({self._fmt_size(unpacked)})")
+        add()
+
+        initrd = InitrdManager(path)
+        if initrd.is_stock():
+            add("Recovery system: STOCK (no TWRP)")
+        else:
+            add("Recovery system: PRESENT")
+            info = initrd.read_info()
+            if info:
+                for key in ("twrp_support", "gapp_support", "root_support",
+                            "root_method", "amazon_support", "recovery_flag",
+                            "build_version", "wsa_version"):
+                    if key in info:
+                        add(f"  {key}: {info[key]}")
+                missing = initrd.twrp_missing()
+                add(f"  missing TWRP files: "
+                    f"{', '.join(missing) if missing else 'none'}")
+                note = info.get("note", "")
+                if note:
+                    add(f"  note: {note}")
+            else:
+                add("  (no info.json)")
+        add()
+
+        if CpioUtils.has_file(path, POSTFSDATA_ARCNAME):
+            issues = initrd.hook_issues()
+            if issues:
+                add(f"Magisk hook: installed, {len(issues)} problem(s)")
+                for issue in issues:
+                    add(f"  - {issue}")
+            else:
+                add("Magisk hook: installed, OK")
+        else:
+            add("Magisk hook: not installed")
+        add()
+
+        add("Module images (spec of the stock image \u2014 extract to see the "
+            "live copy):")
+        for spec in IMAGE_SPECS.values():
+            arc = f"overlay.d/sbin/{spec['image']}"
+            present = CpioUtils.has_file(path, arc)
+            add(f"  {spec['label']}: {spec['image']} \u2014 "
+                f"{'present' if present else 'not present'}")
+            if present:
+                add(f"    id={spec['mod_id']}  name={spec['mod_name']}")
+        add()
+
+        wsa = WSADetector.find_path()
+        add(f"WSA: {wsa or 'not detected'}")
+        if wsa:
+            add(f"WSA running: {WSADetector.is_running()}")
+            wsa_initrd = WSADetector.initrd_path(wsa)
+            same = (os.path.normpath(wsa_initrd) == os.path.normpath(path))
+            add(f"WSA initrd: {wsa_initrd}"
+                + ("  (this file)" if same else ""))
+        return "\n".join(lines)
+
+    def _cli_install_app(self):
+        self._cli_install_system_app(force_update=False)
+
+    def _cli_update_app(self):
+        self._cli_install_system_app(force_update=True)
+
+    def _cli_install_system_app(self, force_update=False):
+        mode = self._admin_gate()
+        if mode is None:
+            return
+        what = "update system apps" if force_update else "install system apps"
+        if not self._confirm_live(what):
+            return
+        paths, _filter = QFileDialog.getOpenFileNames(
+            self, "Choose APK file(s) to add as system app", "",
+            "Android packages (*.apk);;All files (*.*)")
+        if not paths:
+            return
+        profiles = self._collect_profiles(paths)
+        if profiles is None:
+            return
+        label = "Update system app" if force_update else "Install system app"
+        dlg = LogDialog(f"{label} ({mode} module)", self)
+        dlg.finished.connect(lambda _r: self._after_live_change())
+        dlg.run_flow(self._twrp._flow_install_system_app, dict(
+            apk_paths=list(paths),
+            target_initrd=self._real_path,
+            permission_profiles=profiles,
+            force_update=force_update,
+            mode=mode,
+        ))
+        dlg.show()
+
+    def _cli_status(self):
+        dlg = LogDialog("Status", self)
+        dlg.run_printing(self._twrp.status, dict(initrd_path=self._real_path))
+        dlg.show()
+
+    def _cli_list_apps(self):
+        dlg = LogDialog("System apps", self)
+        dlg.run_printing(self._twrp.list_boltware,
+                         dict(initrd_path=self._real_path))
+        dlg.show()
+
+    def _cli_uninstall_app(self):
+        text, ok = QInputDialog.getText(
+            self, "Uninstall system app",
+            "Package name (e.g. com.example.app):")
+        if not ok:
+            return
+        pkg = (text or "").strip()
+        if not pkg:
+            self._info("No package name entered \u2014 nothing to do.")
+            return
+        if not self._confirm(
+                f"Remove {pkg} from the system apps?\n"
+                "The removal is scheduled for the next boot."):
+            return
+        if not self._confirm_live("uninstall system apps"):
+            return
+        dlg = LogDialog(f"Uninstall system app \u2014 {pkg}", self)
+        dlg.finished.connect(lambda _r: self._after_live_change())
+        dlg.run_printing(self._twrp.uninstall_boltware, dict(
+            apk_name=pkg, initrd_path=self._real_path))
+        dlg.show()
+
+    def _cli_enable(self):
+        if not self._confirm_live("enable TWRP recovery"):
+            return
+        dlg = LogDialog("Enable TWRP recovery", self)
+        dlg.finished.connect(lambda _r: self._after_live_change())
+        dlg.run_flow(self._twrp._flow_enable, dict(target_initrd=self._real_path))
+        dlg.show()
+
+    def _cli_disable(self):
+        if not self._confirm_live("disable TWRP recovery"):
+            return
+        dlg = LogDialog("Disable TWRP recovery", self)
+        dlg.finished.connect(lambda _r: self._after_live_change())
+        dlg.run_flow(self._twrp._flow_disable, dict(target_initrd=self._real_path))
+        dlg.show()
+
+    def _cli_install_hook(self):
+        if not self._confirm_live("install the boot hook"):
+            return
+        dlg = LogDialog("Install Magisk hook", self)
+        dlg.finished.connect(lambda _r: self._after_live_change())
+        dlg.run_flow(self._twrp._flow_install_magisk_hook,
+                     dict(target_initrd=self._real_path, force=False))
+        dlg.show()
+
+    def _cli_repair_hook(self):
+        if not self._confirm_live("repair the boot hook"):
+            return
+        dlg = LogDialog("Repair Magisk hook", self)
+        dlg.finished.connect(lambda _r: self._after_live_change())
+        dlg.run_flow(self._twrp._flow_install_magisk_hook,
+                     dict(target_initrd=self._real_path, force=True))
+        dlg.show()
+
+    def _cli_register_img(self):
+        dlg = LogDialog("Register .img handler", self)
+        dlg.run_printing(register_img_handler, {})
+        dlg.show()
+
+    def _cli_unregister_img(self):
+        if not self._confirm("Remove the .img right-click entries "
+                             "(\"Open in WSA IMG Manager\")?"):
+            return
+        dlg = LogDialog("Unregister .img handler", self)
+        dlg.run_printing(unregister_img_handler, {})
+        dlg.show()
 
     def _on_context_menu(self, pos):
         item = self._tree.itemAt(pos)
