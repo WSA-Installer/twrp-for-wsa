@@ -1,0 +1,83 @@
+name: Build dispatcher (init)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'init.c'
+      - '.github/workflows/build-dispatcher.yml'
+
+concurrency:
+  group: dispatcher-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v4
+
+      - name: Install musl Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          musl-gcc --version | head -1
+
+      - name: Compile Dispatcher
+        run: |
+          # -Wno-comment: "/overlay.d/sbin/*" appears inside a block comment of init.c
+          musl-gcc -static -Os -Wall -Wextra -Wno-comment -s -o init init.c
+          ls -l init
+
+      - name: Verify ELF
+        run: |
+          set -euo pipefail
+          file init | tee /tmp/file.txt
+          grep -q 'ELF 64-bit LSB'            /tmp/file.txt
+          grep -q 'x86-64'                    /tmp/file.txt
+          grep -q 'statically linked'         /tmp/file.txt
+          if readelf -l init | grep -q 'INTERP'; then
+            echo '::error::init must be static and must not contain an INTERP segment'
+            exit 1
+          fi
+          readelf -h init
+          readelf -d init || true
+
+      - name: Stage prebuilt/
+        run: |
+          set -euo pipefail
+          mkdir -p prebuilt
+          cp init prebuilt/init
+          chmod 0755 prebuilt/init
+          cd prebuilt
+          sha256sum init > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dispatcher-init
+          path: |
+            prebuilt/init
+            prebuilt/SHA256SUMS
+          if-no-files-found: error
+
+      - name: Commit prebuilt/init
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add prebuilt/init prebuilt/SHA256SUMS
+          if git diff --cached --quiet; then
+            echo 'prebuilt/init is already up to date'
+          else
+            git commit -m 'ci: update prebuilt/init dispatcher binary'
+            git push
+          fi
