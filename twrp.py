@@ -17,14 +17,25 @@ import socket
 import ctypes
 import argparse
 import struct
+import getpass
+import winreg
 import threading
 import tempfile
+import hashlib
+import gzip
+import lzma
+import bz2
+import io
+import zipfile
+import tarfile
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal, QObject, QEventLoop
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QWidget,
+    QApplication, QWidget, QTreeWidget, QTreeWidgetItem, QMenu, QFileDialog,
+    QInputDialog, QMessageBox, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
+    QHeaderView, QAbstractItemView, QSizeGrip, QDialog, QPlainTextEdit,
 )
 
 
@@ -48,6 +59,20 @@ def resource_path(relative_path):
 
 APP_NAME = "TWRP Recovery For WSA"
 APP_VERSION = "4.1.0"
+
+
+def _detect_cli_name():
+    exe = os.path.basename(sys.executable).lower()
+    if getattr(sys, 'frozen', False):
+        return os.path.splitext(exe)[0]
+    argv0 = sys.argv[0] if sys.argv else ""
+    base = os.path.basename(argv0).lower()
+    if base.endswith(".exe"):
+        return os.path.splitext(base)[0]
+    return "twrp.py"
+
+
+CLI_NAME = _detect_cli_name()
 WSA_PKG = "MicrosoftCorporationII.WindowsSubsystemForAndroid"
 WSA_FAMILY = "MicrosoftCorporationII.WindowsSubsystemForAndroid_8wekyb3d8bbwe"
 SEVEN_ZIP = resource_path(os.path.join("assets", "7z.exe"))
@@ -58,6 +83,7 @@ AAPT_PP = resource_path(os.path.join("assets", "aaptpp.exe"))
 IMG_CREATER = resource_path(os.path.join("assets", "img-creater.exe"))
 IMG_EXTRACTOR = resource_path(os.path.join("assets", "img-checker.exe"))
 LSP_IMAGE_NAME = "lsp_wsa-installer.img"
+LSP_IMAGE_NAME_USER = "lsp_wsa-installer-user.img"
 INJECT_TEMP = os.path.join(os.environ.get("TEMP", os.environ.get("TMP", tempfile.gettempdir())), "twrp_temp")
 LSP_TEMP = os.path.join(INJECT_TEMP, "lsp_installer")
 FIX_TEMP = os.path.join(INJECT_TEMP, "Initrd-fix")
@@ -66,8 +92,542 @@ ADB_HOST = "127.0.0.1"
 ADB_DEVICE = f"{ADB_HOST}:{ADB_PORT}"
 CREATE_NO_WINDOW = 0x08000000
 DEBUG = False
+LOG_FOR_USER = False
+
+# --- admin / user module images -------------------------------------------
+# Two independent LSP images live in the initrd. The boot hook
+# (overlay.d/sbin/post-fs-data.sh) mounts EVERY file matching lsp_*.img and
+# runs that image's own post-fs-data.sh, so both coexist without any shell
+# change. Each image's own module.prop id decides which
+# /data/adb/modules/<id> directory is created on boot.
+ADMIN_PASSWORD_SHA256 = "fa882c068ae2288ce8cd32c14b00715c64a5494f1bbeff69e18ab8446452a6e9"
+ADMIN_PASSWORD_ATTEMPTS = 3
+
+IMAGE_SPECS = {
+    "admin": {
+        "image": LSP_IMAGE_NAME,
+        "mod_id": "wsa-installer",
+        "mod_name": "WSA Installer",
+        "temp": "lsp_installer",
+        "priv_xml": "privapp-permissions-wsa-installer.xml",
+        "def_xml": "default-permissions-wsa-installer.xml",
+        "label": "admin",
+    },
+    "user": {
+        "image": LSP_IMAGE_NAME_USER,
+        "mod_id": "wsa-installer-user",
+        "mod_name": "WSA Installer (User)",
+        "temp": "lsp_installer_user",
+        "priv_xml": "privapp-permissions-wsa-installer-user.xml",
+        "def_xml": "default-permissions-wsa-installer-user.xml",
+        "label": "user",
+    },
+}
+
+# Active-module globals (re-pointed by select_image()). Defaults = admin.
+LSP_MOD_ID = IMAGE_SPECS["admin"]["mod_id"]
+LSP_MOD_NAME = IMAGE_SPECS["admin"]["mod_name"]
+LSP_PRIV_XML = IMAGE_SPECS["admin"]["priv_xml"]
+LSP_DEF_XML = IMAGE_SPECS["admin"]["def_xml"]
+LSP_LABEL = IMAGE_SPECS["admin"]["label"]
+
+
+def image_spec(mode):
+    """Spec dict for "admin" / "user". Anything else falls back to "user"."""
+    if mode == "admin":
+        return IMAGE_SPECS["admin"]
+    return IMAGE_SPECS["user"]
+
+
+def select_image(mode):
+    """Point the module-level LSP_* globals at the chosen module image.
+
+    Every LSP helper (has/extract/repack/find/create) reads those globals,
+    so this one call is the single switch between admin and user module."""
+    global LSP_IMAGE_NAME, LSP_TEMP, LSP_MOD_ID, LSP_MOD_NAME
+    global LSP_PRIV_XML, LSP_DEF_XML, LSP_LABEL
+    spec = image_spec(mode)
+    LSP_IMAGE_NAME = spec["image"]
+    LSP_TEMP = os.path.join(INJECT_TEMP, spec["temp"])
+    LSP_MOD_ID = spec["mod_id"]
+    LSP_MOD_NAME = spec["mod_name"]
+    LSP_PRIV_XML = spec["priv_xml"]
+    LSP_DEF_XML = spec["def_xml"]
+    LSP_LABEL = spec["label"]
+    return spec
+
+
+def resolve_mode(mode, default="user"):
+    """CLI mode resolution: None -> default, otherwise admin/user."""
+    if mode in ("admin", "user"):
+        return mode
+    return default
+
+
+def _require_admin_password():
+    """--admin gate. True only when the entered password hashes to
+    ADMIN_PASSWORD_SHA256. The plaintext never touches the source tree."""
+    expected = ADMIN_PASSWORD_SHA256
+    env = os.environ.get("WSA_ADMIN_PASSWORD", "")
+    if env:
+        if hashlib.sha256(env.encode("utf-8")).hexdigest() == expected:
+            print("  Password accepted (WSA_ADMIN_PASSWORD).", flush=True)
+            return True
+        print("  WSA_ADMIN_PASSWORD does not match - falling back to prompt.", flush=True)
+    for attempt in range(1, ADMIN_PASSWORD_ATTEMPTS + 1):
+        try:
+            entered = getpass.getpass("Enter the password: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Password required for --admin. Aborted.", flush=True)
+            return False
+        if hashlib.sha256(entered.encode("utf-8")).hexdigest() == expected:
+            print("  Password accepted. Admin module access granted.", flush=True)
+            return True
+        print(f"  Wrong password ({attempt}/{ADMIN_PASSWORD_ATTEMPTS}).", flush=True)
+    print("  Too many failed attempts - admin install cancelled.", flush=True)
+    return False
+
+
+# --- .img "Open with" / Explorer context menu -------------------------------
+IMG_PROGID = "wsa-installer.img"
+IMG_VERB_KEY = "WsaInstallerImgManager"
+IMG_VERB_TEXT = "Open in WSA IMG Manager"
+IMG_DESC = "WSA IMG Manager"
+
+
+def _img_icon_path():
+    _dir = os.path.dirname(os.path.abspath(__file__))
+    for name in ("icon.ico", "twrp.ico"):
+        p = os.path.join(_dir, "assets", name)
+        if os.path.isfile(p):
+            return p
+    return os.path.abspath(sys.executable)
+
+
+def img_open_command(command=None):
+    """Registry command line that opens an .img with the IMG Manager GUI."""
+    if command:
+        return command
+    _here = os.path.dirname(os.path.abspath(__file__))
+    if getattr(sys, "frozen", False):
+        _exe = os.path.dirname(os.path.abspath(sys.executable))
+        _twrp = os.path.join(_exe, "Twrp.exe")
+        if os.path.isfile(_twrp):
+            return f'"{_twrp}" --gui --path "%1"'
+        return f'"{os.path.abspath(sys.executable)}" --gui --path "%1"'
+    _script = os.path.join(_here, "twrp.py")
+    _pyw = os.path.join(_here, "venv", "Scripts", "pythonw.exe")
+    if not os.path.isfile(_pyw):
+        _pyw = sys.executable
+    return f'"{_pyw}" "{_script}" --gui --path "%1"'
+
+
+def register_img_handler(command=None):
+    """Add ".img -> Open with -> WSA IMG Manager" plus a classic right-click verb.
+
+    Only additive keys are written: .img's own default value is never touched,
+    so the existing default handler (7-Zip, WinRAR, ...) keeps working."""
+    cmd = img_open_command(command)
+    icon = _img_icon_path()
+    cls = "Software\\Classes"
+
+    hk = winreg.HKEY_LOCAL_MACHINE
+    root_name = "HKLM"
+    try:
+        _probe = winreg.OpenKey(hk, f"{cls}\\.img", 0, winreg.KEY_WRITE)
+        winreg.CloseKey(_probe)
+    except OSError:
+        hk = winreg.HKEY_CURRENT_USER
+        root_name = "HKCU"
+
+    writes = [
+        # 1) makes the ProgID eligible for the "Open with" list
+        (f"{cls}\\.img\\OpenWithProgids", IMG_PROGID, b"", winreg.REG_NONE),
+        # 2) the named ProgID entry
+        (f"{cls}\\{IMG_PROGID}", "", IMG_DESC, winreg.REG_SZ),
+        (f"{cls}\\{IMG_PROGID}\\DefaultIcon", "", icon, winreg.REG_SZ),
+        (f"{cls}\\{IMG_PROGID}\\shell\\open\\command", "", cmd, winreg.REG_SZ),
+        # 3) classic right-click verb directly on the extension
+        (f"{cls}\\.img\\shell\\{IMG_VERB_KEY}", "", IMG_VERB_TEXT, winreg.REG_SZ),
+        (f"{cls}\\.img\\shell\\{IMG_VERB_KEY}", "MUIVerb", IMG_VERB_TEXT, winreg.REG_SZ),
+        (f"{cls}\\.img\\shell\\{IMG_VERB_KEY}", "Icon", icon, winreg.REG_SZ),
+        (f"{cls}\\.img\\shell\\{IMG_VERB_KEY}\\command", "", cmd, winreg.REG_SZ),
+    ]
+    # 4) exe-based Open-with entry (frozen build only)
+    if getattr(sys, "frozen", False):
+        writes += [
+            (f"{cls}\\Applications\\Twrp.exe", "", IMG_DESC, winreg.REG_SZ),
+            (f"{cls}\\Applications\\Twrp.exe\\shell\\open\\command", "", cmd, winreg.REG_SZ),
+            (f"{cls}\\Applications\\Twrp.exe\\SupportedTypes", ".img", b"", winreg.REG_NONE),
+        ]
+
+    try:
+        for path, name, value, kind in writes:
+            with winreg.CreateKey(hk, path) as k:
+                winreg.SetValueEx(k, name, 0, kind, value)
+    except OSError as ex:
+        print(f"  [error] registry write failed: {ex}", flush=True)
+        return 1
+
+    print(f"  [registered] {IMG_DESC} (.img Open with) [{root_name}]", flush=True)
+    print(f"  command: {cmd}", flush=True)
+    try:
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x1000, None, None)
+    except Exception:
+        pass
+    return 0
+
+
+def unregister_img_handler():
+    """Remove exactly the keys register_img_handler() wrote (idempotent)."""
+    cls = "Software\\Classes"
+    removed = 0
+
+    def _del_value(hive, path, name):
+        nonlocal removed
+        try:
+            with winreg.OpenKey(hive, path, 0, winreg.KEY_SET_VALUE) as k:
+                winreg.DeleteValue(k, name)
+                removed += 1
+        except OSError:
+            pass
+
+    def _del_key(hive, path):
+        nonlocal removed
+        try:
+            winreg.DeleteKey(hive, path)
+            removed += 1
+        except OSError:
+            pass
+
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        _del_value(hive, f"{cls}\\.img\\OpenWithProgids", IMG_PROGID)
+        for p in (
+            f"{cls}\\.img\\shell\\{IMG_VERB_KEY}\\command",
+            f"{cls}\\.img\\shell\\{IMG_VERB_KEY}",
+            f"{cls}\\{IMG_PROGID}\\shell\\open\\command",
+            f"{cls}\\{IMG_PROGID}\\shell\\open",
+            f"{cls}\\{IMG_PROGID}\\shell",
+            f"{cls}\\{IMG_PROGID}\\DefaultIcon",
+            f"{cls}\\{IMG_PROGID}",
+        ):
+            _del_key(hive, p)
+        _del_value(hive, f"{cls}\\Applications\\Twrp.exe\\SupportedTypes", ".img")
+        for p in (
+            f"{cls}\\Applications\\Twrp.exe\\shell\\open\\command",
+            f"{cls}\\Applications\\Twrp.exe\\shell\\open",
+            f"{cls}\\Applications\\Twrp.exe\\shell",
+        ):
+            _del_key(hive, p)
+        # only remove the Applications\Twrp.exe key if we own it
+        try:
+            with winreg.OpenKey(hive, f"{cls}\\Applications\\Twrp.exe") as k:
+                _v, _t = winreg.QueryValueEx(k, "")
+            if _v == IMG_DESC:
+                _del_key(hive, f"{cls}\\Applications\\Twrp.exe\\SupportedTypes")
+                _del_key(hive, f"{cls}\\Applications\\Twrp.exe")
+        except OSError:
+            pass
+
+    print(f"  [unregistered] {IMG_DESC} (.img Open with) - {removed} entrie(s) removed",
+          flush=True)
+    try:
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x1000, None, None)
+    except Exception:
+        pass
+    return 0
+
+
+POSTFSDATA_ARCNAME = "overlay.d/sbin/post-fs-data.sh"
+POSTFSDATA_MARKER = b"# --- TWRP uninstall handler"
+SHELLCHECK_LINE = b"    # shellcheck disable=SC2174\n"
+HOOK_MODES = {
+    "lspinit": 0o100750,
+    "magiskinit": 0o100750,
+    "wsainit": 0o100777,
+    POSTFSDATA_ARCNAME: 0o100644,
+}
+HOOK_DIRS = ["overlay.d", "overlay.d/sbin"]
+HOOK_DIR_MODE = 0o040750
+EXEC_NAMES = {
+    "init", "init.real", "recovery", "twrp", "adbd", "sh", "busybox",
+    "magiskinit", "magisk", "magisk32", "magisk64", "supolicy", "ksud",
+    "lspinit", "wsainit", "su", "setprop", "getprop", "start",
+}
 TWRP_REQUIRED_FILES = ("/sbin/twrp", "/sbin/busybox", "/sbin/linker64", "/info.json")
 TWRP_REQUIRED_DIRS = ("/twres", "/etc", "/system/lib64")
+POSTFSDATA_UNINSTALL_BLOCK = (
+    b"\n# --- TWRP uninstall handler (background) ---\n"
+    b"(\n"
+    b"    while [ \"$(getprop sys.boot_completed)\" != \"1\" ]; do sleep 1; done\n"
+    b"    sleep 5\n"
+    b"    mkdir -p /storage/emulated/0/MT2\n"
+    b"    EARLY_LOG=\"$(dirname \"$0\")/post-fs-data.log\"\n"
+    b"    USER_LOG=\"/storage/emulated/0/MT2/uninstall.log\"\n"
+    b"    cp -f \"$EARLY_LOG\" \"$USER_LOG\" 2>/dev/null\n"
+    b"    log_uninstall() {\n"
+    b"        echo \"[$(date '+%Y-%m-%d %H:%M:%S')] $1\" >> \"$EARLY_LOG\"\n"
+    b"        echo \"[$(date '+%Y-%m-%d %H:%M:%S')] $1\" >> \"$USER_LOG\"\n"
+    b"    }\n"
+    b"    UNINSTALL_FILE=\"$(dirname \"$0\")/uninstall.txt\"\n"
+    b"    if [ -f \"$UNINSTALL_FILE\" ]; then\n"
+    b"        log_uninstall \"=== TWRP Uninstall start ===\"\n"
+    b"        while IFS= read -r PKG; do\n"
+    b"            [ -z \"$PKG\" ] && continue\n"
+    b"            log_uninstall \"UNINSTALL: $PKG\"\n"
+    b"            if pm uninstall \"$PKG\" 2>/dev/null; then\n"
+    b"                log_uninstall \"  UNINSTALLED: $PKG\"\n"
+    b"            else\n"
+    b"                log_uninstall \"  FAILED: $PKG\"\n"
+    b"            fi\n"
+    b"        done < \"$UNINSTALL_FILE\"\n"
+    b"        rm -f \"$UNINSTALL_FILE\"\n"
+    b"        log_uninstall \"=== TWRP Uninstall complete ===\"\n"
+    b"    fi\n"
+    b") &\n"
+    b"# --- end TWRP uninstall handler ---\n"
+)
+
+
+def guess_mode(arcname, data):
+    base = arcname.rstrip("/").split("/")[-1].lower()
+    if arcname in HOOK_MODES:
+        return HOOK_MODES[arcname]
+    if base.endswith(".sh"):
+        return 0o100755
+    if base in EXEC_NAMES:
+        return 0o100755
+    if isinstance(data, (bytes, bytearray)) and data[:4] == b"\x7fELF":
+        if ".so" not in base:
+            return 0o100755
+    return 0o100644
+
+
+def _looks_like_text(data):
+    """True when `data` decodes cleanly as UTF-8, i.e. the editor can take it."""
+    if not data:
+        return True
+    if b"\x00" in data:
+        return False
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _walk_dir(src_dir):
+    """(arcname, is_dir, full_path) under src_dir, directories first and
+    depth-ascending so archives built from it keep a valid entry order.
+
+    A symlink to a folder is reported as a FILE row: os.walk does not descend
+    into it (followlinks=False) and the link itself must be written back as a
+    link, not as a directory it does not contain.
+    """
+    rows = []
+    for dirpath, dirnames, filenames in os.walk(src_dir):
+        rel = os.path.relpath(dirpath, src_dir).replace("\\", "/")
+        rel = "" if rel == "." else rel
+        for name in dirnames:
+            full = os.path.join(dirpath, name)
+            try:
+                linked = os.path.islink(full)
+            except OSError:
+                linked = False
+            rows.append((f"{rel}/{name}" if rel else name, not linked, full))
+        for name in filenames:
+            rows.append((f"{rel}/{name}" if rel else name, False,
+                         os.path.join(dirpath, name)))
+    rows.sort(key=lambda row: (0 if row[1] else 1,
+                               row[0].count("/"), row[0].lower()))
+    return rows
+
+
+def _read_link_target(full):
+    """Symlink target, whether the OS gave us a real link or a plain file."""
+    try:
+        if os.path.islink(full):
+            return os.readlink(full)
+    except OSError:
+        pass
+    try:
+        with open(full, "rb") as handle:
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _symlink_target(full, arcname, orig_modes):
+    """Link target when this row must be written as a symlink, else None.
+
+    Checks both the recorded cpio mode and the filesystem, so a link the user
+    just added in the editor is not mistaken for a regular file (opening a
+    Windows link can fail outright).
+    """
+    mode = orig_modes.get(arcname)
+    is_link = mode is not None and (mode & 0o170000) == 0o120000
+    try:
+        if os.path.islink(full):
+            is_link = True
+    except OSError:
+        pass
+    return _read_link_target(full) if is_link else None
+
+
+def _file_perms(arcname, data, orig_modes):
+    """Permission bits: keep the original when we have one, else guess."""
+    mode = orig_modes.get(arcname)
+    if mode is not None and (mode & 0o7777):
+        return mode & 0o7777
+    return guess_mode(arcname, data) & 0o7777
+
+
+def build_cpio_from_dir(src_dir, orig_modes=None):
+    """Rebuild a cpio archive from an edited tree, entirely in memory.
+
+    Symlinks round-trip through _read_link_target(); every entry the user did
+    not touch keeps its original mode.
+    """
+    orig_modes = orig_modes or {}
+    parts = []
+    for arcname, is_dir, full in _walk_dir(src_dir):
+        mode = orig_modes.get(arcname)
+        if is_dir:
+            if mode is not None and (mode & 0o170000) == 0o040000:
+                perms = mode & 0o7777
+            else:
+                perms = 0o0755
+            parts.append(CpioUtils._build_entry(arcname, b"",
+                                                mode=0o040000 | perms))
+            continue
+        target = _symlink_target(full, arcname, orig_modes)
+        if target is not None:
+            parts.append(CpioUtils._build_entry(
+                arcname, target.encode("utf-8"), mode=0o120777))
+            continue
+        with open(full, "rb") as handle:
+            data = handle.read()
+        parts.append(CpioUtils._build_entry(
+            arcname, data, mode=0o100000 | _file_perms(arcname, data, orig_modes)))
+    parts.append(CpioUtils._trailer_entry())
+    return b"".join(parts)
+
+
+def build_zip_from_dir(src_dir, orig_modes=None):
+    """Rebuild a zip archive from an edited tree."""
+    orig_modes = orig_modes or {}
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for arcname, is_dir, full in _walk_dir(src_dir):
+            mode = orig_modes.get(arcname)
+            info = zipfile.ZipInfo(arcname + "/" if is_dir else arcname)
+            info.date_time = (1980, 1, 1, 0, 0, 0)
+            if is_dir:
+                if mode is not None and (mode & 0o170000) == 0o040000:
+                    info.external_attr = ((0o040000 | (mode & 0o7777)) << 16)
+                else:
+                    info.external_attr = (0o040755 << 16) | 0x10
+                zf.writestr(info, b"")
+                continue
+            target = _symlink_target(full, arcname, orig_modes)
+            if target is not None:
+                info.external_attr = 0o120777 << 16
+                zf.writestr(info, target.encode("utf-8"))
+                continue
+            with open(full, "rb") as handle:
+                data = handle.read()
+            perms = _file_perms(arcname, data, orig_modes)
+            info.external_attr = (0o100000 | perms) << 16
+            zf.writestr(info, data)
+    return buffer.getvalue()
+
+
+def build_tar_from_dir(src_dir, orig_modes=None):
+    """Rebuild an uncompressed tar archive from an edited tree."""
+    orig_modes = orig_modes or {}
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tf:
+        for arcname, is_dir, full in _walk_dir(src_dir):
+            mode = orig_modes.get(arcname)
+            info = tarfile.TarInfo(arcname)
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            if is_dir:
+                info.type = tarfile.DIRTYPE
+                if mode is not None and (mode & 0o170000) == 0o040000:
+                    info.mode = mode & 0o7777
+                else:
+                    info.mode = 0o0755
+                tf.addfile(info)
+                continue
+            target = _symlink_target(full, arcname, orig_modes)
+            if target is not None:
+                info.type = tarfile.SYMTYPE
+                info.mode = 0o0777
+                info.linkname = target
+                tf.addfile(info)
+                continue
+            with open(full, "rb") as handle:
+                data = handle.read()
+            info.type = tarfile.REGTYPE
+            info.size = len(data)
+            info.mode = _file_perms(arcname, data, orig_modes)
+            tf.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def patch_postfsdata(base):
+    out = base.replace(SHELLCHECK_LINE, b"")
+    if POSTFSDATA_MARKER in out:
+        return out
+    return out + POSTFSDATA_UNINSTALL_BLOCK
+
+
+DANGEROUS_PERMS = [
+    "android.permission.READ_CALENDAR", "android.permission.WRITE_CALENDAR",
+    "android.permission.CAMERA",
+    "android.permission.READ_CONTACTS", "android.permission.WRITE_CONTACTS",
+    "android.permission.GET_ACCOUNTS",
+    "android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION",
+    "android.permission.ACCESS_BACKGROUND_LOCATION", "android.permission.ACCESS_MEDIA_LOCATION",
+    "android.permission.RECORD_AUDIO",
+    "android.permission.READ_PHONE_STATE", "android.permission.READ_PHONE_NUMBERS",
+    "android.permission.CALL_PHONE", "android.permission.ANSWER_PHONE_CALLS",
+    "android.permission.PROCESS_OUTGOING_CALLS", "android.permission.ACCEPT_HANDOVER",
+    "android.permission.READ_CALL_LOG", "android.permission.WRITE_CALL_LOG",
+    "android.permission.ADD_VOICEMAIL", "android.permission.USE_SIP",
+    "android.permission.BODY_SENSORS", "android.permission.BODY_SENSORS_BACKGROUND",
+    "android.permission.ACTIVITY_RECOGNITION",
+    "android.permission.SEND_SMS", "android.permission.RECEIVE_SMS",
+    "android.permission.READ_SMS", "android.permission.RECEIVE_MMS",
+    "android.permission.RECEIVE_WAP_PUSH",
+    "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE",
+    "android.permission.READ_MEDIA_IMAGES", "android.permission.READ_MEDIA_VIDEO",
+    "android.permission.READ_MEDIA_AUDIO", "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+    "android.permission.BLUETOOTH_SCAN", "android.permission.BLUETOOTH_ADVERTISE",
+    "android.permission.BLUETOOTH_CONNECT",
+    "android.permission.NEARBY_WIFI_DEVICES", "android.permission.UWB_RANGING",
+    "android.permission.POST_NOTIFICATIONS",
+]
+
+SPECIAL_PERMS = [
+    "android.permission.SYSTEM_ALERT_WINDOW",
+    "android.permission.WRITE_SETTINGS",
+    "android.permission.REQUEST_INSTALL_PACKAGES",
+    "android.permission.REQUEST_DELETE_PACKAGES",
+    "android.permission.MANAGE_EXTERNAL_STORAGE",
+    "android.permission.MANAGE_MEDIA",
+    "android.permission.PACKAGE_USAGE_STATS",
+    "android.permission.LOADER_USAGE_STATS",
+    "android.permission.SCHEDULE_EXACT_ALARM",
+    "android.permission.USE_FULL_SCREEN_INTENT",
+    "android.permission.TURN_SCREEN_ON",
+    "android.permission.INTERACT_ACROSS_PROFILES",
+    "android.permission.INSTANT_APP_FOREGROUND_SERVICE",
+    "android.permission.SMS_FINANCIAL_TRANSACTIONS",
+    "android.permission.MANAGE_ONGOING_CALLS",
+    "android.permission.MEDIA_ROUTING_CONTROL",
+]
 
 PRIVILEGED_PERMS = {
     "android.permission.WRITE_SECURE_SETTINGS", "android.permission.READ_LOGS",
@@ -101,24 +661,93 @@ PRIVILEGED_PERMS = {
     "android.permission.READ_WIFI_CREDENTIAL",
     "android.permission.SUBSTITUTE_NOTIFICATION_APP_NAME",
     "android.permission.DISPATCH_PROVISIONING_MESSAGE",
-    "android.permission.PROCESS_OUTGOING_CALLS", "android.permission.UPDATE_LOCK",
+    "android.permission.UPDATE_LOCK",
     "android.permission.MOUNT_UNMOUNT_FILESYSTEMS",
     "android.permission.ACCESS_FM_RADIO", "android.permission.BROADCAST_PHONE_INTENT",
     "android.permission.PERFORM_SMS_AUTH",
 }
 
-DANGEROUS_KEYWORDS = (
-    "CAMERA", "RECORD_AUDIO", "READ_CONTACTS", "WRITE_CONTACTS",
-    "READ_CALL_LOG", "WRITE_CALL_LOG", "READ_CALENDAR", "WRITE_CALENDAR",
-    "READ_SMS", "SEND_SMS", "RECEIVE_SMS", "RECEIVE_MMS",
-    "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION",
-    "READ_EXTERNAL_STORAGE", "WRITE_EXTERNAL_STORAGE",
-    "READ_MEDIA_IMAGES", "READ_MEDIA_VIDEO", "READ_MEDIA_AUDIO",
-    "BLUETOOTH_CONNECT", "BLUETOOTH_SCAN", "BLUETOOTH_ADVERTISE",
-    "READ_PHONE_NUMBERS", "ANSWER_PHONE_CALLS", "NEARBY_WIFI_DEVICES",
-    "UWB_RANGING", "BODY_SENSORS", "ACTIVITY_RECOGNITION",
-    "POST_NOTIFICATIONS", "SYSTEM_ALERT_WINDOW",
-)
+NORMAL_PERMS = [
+    "android.permission.INTERNET", "android.permission.ACCESS_NETWORK_STATE",
+    "android.permission.ACCESS_WIFI_STATE", "android.permission.CHANGE_NETWORK_STATE",
+    "android.permission.CHANGE_WIFI_STATE", "android.permission.CHANGE_WIFI_MULTICAST_STATE",
+    "android.permission.VIBRATE", "android.permission.WAKE_LOCK",
+    "android.permission.FOREGROUND_SERVICE",
+    "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+    "android.permission.FOREGROUND_SERVICE_LOCATION",
+    "android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE",
+    "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
+    "android.permission.FOREGROUND_SERVICE_HEALTH",
+    "android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING",
+    "android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED",
+    "android.permission.FOREGROUND_SERVICE_SHORT_SERVICE",
+    "android.permission.RECEIVE_BOOT_COMPLETED",
+    "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+    "android.permission.EXPAND_STATUS_BAR", "android.permission.DISABLE_KEYGUARD",
+    "android.permission.SET_WALLPAPER", "android.permission.SET_WALLPAPER_HINTS",
+    "android.permission.READ_SYNC_SETTINGS", "android.permission.WRITE_SYNC_SETTINGS",
+    "android.permission.READ_SYNC_STATS", "android.permission.BLUETOOTH",
+    "android.permission.BLUETOOTH_ADMIN", "android.permission.BLUETOOTH_PRIVILEGED",
+    "android.permission.NFC", "android.permission.NFC_TRANSACTION_EVENT",
+    "android.permission.NFC_HOST_CARD_EMULATION", "android.permission.ACCESS_BLUETOOTH_SHARE",
+    "android.permission.SUBSCRIBE_TO_KEYGUARD_LOCKED", "android.permission.USE_BIOMETRIC",
+    "android.permission.USE_FINGERPRINT", "android.permission.BIND_ACCESSIBILITY_SERVICE",
+    "android.permission.ACCESS_NOTIFICATION_POLICY",
+    "android.permission.ACCESS_NOTIFICATION_SERVICE", "android.permission.GET_TASKS",
+    "android.permission.REAL_GET_TASKS", "android.permission.READ_APP_BADGE",
+    "android.permission.WRITE_APP_BADGE", "com.android.launcher.permission.INSTALL_SHORTCUT",
+    "com.android.launcher.permission.UNINSTALL_SHORTCUT",
+    "android.permission.READ_DEVICE_CONFIG", "android.permission.WRITE_DEVICE_CONFIG",
+    "android.permission.QUICK_SETTINGS_TILE", "com.android.alarm.permission.SET_ALARM",
+    "android.permission.FLASHLIGHT", "android.permission.READ_HISTORY_BOOKMARKS",
+    "android.permission.WRITE_HISTORY_BOOKMARKS", "android.permission.WRITE_MEDIA_STORAGE",
+    "android.permission.READ_MEDIA_STORAGE", "android.permission.MANAGE_DOCUMENTS",
+    "android.permission.MANAGE_SCOPED_STORAGE", "android.permission.CAPTURE_AUDIO_OUTPUT",
+    "android.permission.CAPTURE_VIDEO_OUTPUT",
+    "android.permission.CAPTURE_SECURE_VIDEO_OUTPUT",
+    "android.permission.CAPTURE_TUNNEL_BUFFERS", "android.permission.FACTORY_RESET",
+    "android.permission.SET_POINTER_SPEED", "android.permission.SET_KEYBOARD_LAYOUT",
+    "android.permission.READ_FRAME_BUFFER", "android.permission.WRITE_FRAME_BUFFER",
+    "android.permission.MAGNIFY_CONTROL", "android.permission.ACCESS_SURFACE_FLINGER",
+    "android.permission.READ_INPUT_STATE", "android.permission.REORDER_TASKS",
+    "android.permission.CHANGE_CONFIGURATION", "android.permission.KILL_BACKGROUND_PROCESSES",
+    "android.permission.FORCE_STOP_PACKAGES", "android.permission.GET_APP_OPS_STATS",
+    "android.permission.SET_ACTIVITY_WATCHER", "android.permission.SUSPEND_APPS",
+    "android.permission.GET_TOP_ACTIVITY_INFO", "android.permission.SET_PROCESS_LIMIT",
+    "android.permission.SET_ALWAYS_FINISH", "android.permission.SET_DEBUG_APP",
+    "android.permission.MOVE_PACKAGE", "android.permission.ACCESS_ALL_EXTERNAL_STORAGE",
+    "android.permission.MOUNT_FORMAT_FILESYSTEMS", "android.permission.STORAGE_INTERNAL",
+    "android.permission.GLOBAL_SEARCH", "android.permission.MANAGE_ACCOUNTS",
+    "android.permission.AUTHENTICATE_ACCOUNTS", "android.permission.USE_CREDENTIALS",
+    "android.permission.INTERACT_ACROSS_USERS_FULL", "android.permission.CREATE_USERS",
+    "android.permission.UPDATE_APP_OPS_STATS", "android.permission.ACCESS_KEYGUARD_SECURE",
+    "android.permission.BIND_APPWIDGET", "android.permission.BIND_DEVICE_ADMIN",
+    "android.permission.READ_PROFILE", "android.permission.WRITE_PROFILE",
+    "android.permission.READ_SOCIAL_STREAM", "android.permission.WRITE_SOCIAL_STREAM",
+    "android.permission.READ_USER_DICTIONARY", "android.permission.WRITE_USER_DICTIONARY",
+    "android.permission.BIND_WALLPAPER", "android.permission.INSTALL_LOCATION_PROVIDER",
+    "android.permission.INTERNAL_SYSTEM_WINDOW", "android.permission.LOCATION_HARDWARE",
+    "android.permission.MANAGE_APEX_SERVICES", "android.permission.MANAGE_APP_TOKENS",
+    "android.permission.MANAGE_CONTENT_CAPTURE",
+    "android.permission.MANAGE_CONTENT_SUGGESTIONS",
+    "android.permission.MANAGE_NOTIFIFICATION_POLICY",
+    "android.permission.MANAGE_NOTIFICATION_LISTENERS", "android.permission.MANAGE_OWN_CALLS",
+    "android.permission.MANAGE_ROLE_HOLDERS", "android.permission.MANAGE_SENSORS",
+    "android.permission.MANAGE_VOICE_INTERACTION", "android.permission.MODIFY_AUDIO_ROUTING",
+    "android.permission.NETWORK_SETUP_WIZARD", "android.permission.NOTIFICATION_LISTEN",
+    "android.permission.OBSERVE_GRANT_REVOKE_PERMISSIONS",
+    "android.permission.OBSERVE_APP_BIND", "android.permission.READ_INSTALL_SESSIONS",
+    "android.permission.READ_NETWORK_USAGE_HISTORY",
+    "android.permission.READ_WALLPAPER_INTERNAL",
+    "android.permission.RECEIVE_EMERGENCY_BROADCAST", "android.permission.REMOVE_TASKS",
+    "android.permission.REQUEST_PASSWORD_COMPLEXITY",
+    "android.permission.RESET_FINGERPRINT_LOCKOUT", "android.permission.RESTART_PACKAGES",
+    "android.permission.SEND_RESPOND_VIA_MESSAGE", "android.permission.SERIAL_PORT",
+    "android.permission.SET_ANIMATION_SCALE", "android.permission.SET_INPUT_METHOD",
+    "android.permission.SET_ORIENTATION", "android.permission.SET_PREFERRED_NETWORKS",
+    "android.permission.START_TASKS_FROM_RECENTS", "android.permission.STOP_APP_SWITCHES",
+    "android.permission.TRANSMIT_IR", "android.permission.UNINSTALL_SHORTCUT",
+]
 
 
 def _debug(msg):
@@ -285,6 +914,18 @@ class CpioUtils:
                     f.read(pad2)
 
     @staticmethod
+    def _write_with_retry(write_fn):
+        try:
+            return write_fn()
+        except PermissionError:
+            pass
+        if WSADetector.is_running():
+            _log("Permission denied, stopping WSA...")
+            KillWSA.kill_all()
+            time.sleep(3)
+        return write_fn()
+
+    @staticmethod
     def replace_bytes(archive_path, old_bytes, new_bytes):
         _debug(f"replace_bytes({old_bytes[:30]} -> {new_bytes[:30]})")
         if len(old_bytes) != len(new_bytes):
@@ -296,8 +937,10 @@ class CpioUtils:
         if count == 0:
             return 0
         new_data = data.replace(old_bytes, new_bytes, 1)
-        with open(archive_path, "wb") as f:
-            f.write(new_data)
+        def _do_write():
+            with open(archive_path, "wb") as f:
+                f.write(new_data)
+        CpioUtils._write_with_retry(_do_write)
         return count
 
     @staticmethod
@@ -331,10 +974,12 @@ class CpioUtils:
             before_trailer = f.read(trailer_offset)
         new_entry = CpioUtils._build_entry(arcname, file_data, mode=mode)
         trailer = CpioUtils._trailer_entry()
-        with open(archive_path, "wb") as f:
-            f.write(before_trailer)
-            f.write(new_entry)
-            f.write(trailer)
+        def _do_write():
+            with open(archive_path, "wb") as f:
+                f.write(before_trailer)
+                f.write(new_entry)
+                f.write(trailer)
+        CpioUtils._write_with_retry(_do_write)
 
     @staticmethod
     def add_symlink(archive_path, link_name, target):
@@ -346,10 +991,12 @@ class CpioUtils:
             before_trailer = f.read(trailer_offset)
         new_entry = CpioUtils._build_entry(link_name, target, mode=0o120777, nlink=1)
         trailer = CpioUtils._trailer_entry()
-        with open(archive_path, "wb") as f:
-            f.write(before_trailer)
-            f.write(new_entry)
-            f.write(trailer)
+        def _do_write():
+            with open(archive_path, "wb") as f:
+                f.write(before_trailer)
+                f.write(new_entry)
+                f.write(trailer)
+        CpioUtils._write_with_retry(_do_write)
 
     @staticmethod
     def add_files(archive_path, entries):
@@ -363,9 +1010,11 @@ class CpioUtils:
         for arcname, file_data, mode in entries:
             parts.append(CpioUtils._build_entry(arcname, file_data, mode=mode))
         parts.append(CpioUtils._trailer_entry())
-        with open(archive_path, "wb") as f:
-            for part in parts:
-                f.write(part)
+        def _do_write():
+            with open(archive_path, "wb") as f:
+                for part in parts:
+                    f.write(part)
+        CpioUtils._write_with_retry(_do_write)
 
     @staticmethod
     def delete_file(archive_path, entry_name):
@@ -385,21 +1034,241 @@ class CpioUtils:
             entry_end += pad2
             parts.append(data[entry_start:entry_end])
         parts.append(CpioUtils._trailer_entry())
-        with open(archive_path, "wb") as f:
-            for part in parts:
-                f.write(part)
+        def _do_write():
+            with open(archive_path, "wb") as f:
+                for part in parts:
+                    f.write(part)
+        CpioUtils._write_with_retry(_do_write)
+
+    @staticmethod
+    def read_all(archive_path):
+        with open(archive_path, "rb") as f:
+            raw = f.read()
+        out = []
+        for name, data_start, filesize, header_pos in CpioUtils.scan_entries(archive_path):
+            fields = CpioUtils._parse_header(raw[header_pos:header_pos + 110])
+            out.append((name, fields["mode"], raw[data_start:data_start + filesize]))
+        return out
+
+    @staticmethod
+    def parent_dirs(arcname):
+        parts = arcname.strip("/").split("/")
+        return ["/".join(parts[:i]) for i in range(1, len(parts))]
+
+    @staticmethod
+    def ensure_dir_entries(archive_path, dirs, dir_mode=0o040750):
+        """Guarantee each dir exists as a cpio dir entry placed before all of
+        its descendants. Rewrites the archive only when that is not already
+        true; untouched entries keep their bytes (mode, uid, gid, mtime)."""
+        dirs = [d.strip("/") for d in dirs if d.strip("/")]
+        if not dirs:
+            return False
+        with open(archive_path, "rb") as f:
+            raw = f.read()
+        chunks = []
+        for name, data_start, filesize, header_pos in CpioUtils.scan_entries(archive_path):
+            pad2 = (4 - (filesize % 4)) % 4
+            chunks.append((name, raw[header_pos:data_start + filesize + pad2]))
+        wanted = set(dirs)
+        names = [n for n, _ in chunks]
+        for d in dirs:
+            if d not in names:
+                break
+            di = names.index(d)
+            if any(n.startswith(d + "/") and i < di for i, n in enumerate(names)):
+                break
+        else:
+            _debug(f"ensure_dir_entries: {dirs} already ordered")
+            return False
+        _debug(f"ensure_dir_entries: rebuilding for {dirs}")
+        result = [(n, c) for n, c in chunks if n not in wanted]
+        for d in sorted(dirs, key=lambda p: p.count("/")):
+            idx = len(result)
+            for i, (n, _c) in enumerate(result):
+                if n.startswith(d + "/"):
+                    idx = i
+                    break
+            orig = next((c for n, c in chunks if n == d), None)
+            chunk = orig if orig is not None else CpioUtils._build_entry(d, b"", mode=dir_mode)
+            result.insert(idx, (d, chunk))
+        def _do_write():
+            with open(archive_path, "wb") as f:
+                for _n, c in result:
+                    f.write(c)
+                f.write(CpioUtils._trailer_entry())
+        CpioUtils._write_with_retry(_do_write)
+        return True
+
+    @staticmethod
+    def list_entries(archive_path):
+        """[(name, mode, filesize)] for every entry.
+
+        scan_entries() does not decode the mode, so the GUI cannot tell a
+        file from a folder or a symlink without this.
+        """
+        _debug(f"list_entries({os.path.basename(archive_path)})")
+        entries = []
+        with open(archive_path, "rb") as f:
+            while True:
+                header = f.read(110)
+                fields = CpioUtils._parse_header(header)
+                if fields is None:
+                    break
+                raw_name = f.read(fields["namesize"])
+                if raw_name.rstrip(b"\x00") == CpioUtils.TRAILER_NAME.rstrip(b"\x00"):
+                    break
+                name = raw_name.rstrip(b"\x00").decode("utf-8", errors="replace")
+                data_start = f.tell()
+                pad = (4 - (data_start % 4)) % 4
+                data_start += pad
+                entries.append((name, fields["mode"], fields["filesize"]))
+                f.seek(data_start + fields["filesize"])
+                pad2 = (4 - (fields["filesize"] % 4)) % 4
+                if pad2:
+                    f.read(pad2)
+        _debug(f"list_entries: found {len(entries)} entries")
+        return entries
+
+    @staticmethod
+    def overwrite_file(archive_path, arcname, file_data, mode=None):
+        """Replace an existing entry's payload.
+
+        add_file() alone would just append a second entry with the same name,
+        so the old one is dropped first.
+        """
+        _debug(f"overwrite_file({arcname}, {len(file_data)} bytes)")
+        if CpioUtils.has_file(archive_path, arcname):
+            CpioUtils.delete_file(archive_path, arcname)
+        if mode is None:
+            mode = guess_mode(arcname, file_data)
+        CpioUtils.add_file(archive_path, arcname, file_data, mode=mode)
+
+    @staticmethod
+    def delete_tree(archive_path, arcname):
+        """Drop one entry and every descendant under arcname/."""
+        arcname = arcname.strip("/")
+        prefix = arcname + "/"
+        _debug(f"delete_tree({arcname})")
+        entries = CpioUtils.scan_entries(archive_path)
+        victims = {name for name, *_ in entries if name == arcname or name.startswith(prefix)}
+        if not victims:
+            _debug(f"delete_tree({arcname}): nothing to remove")
+            return 0
+        with open(archive_path, "rb") as f:
+            data = f.read()
+        parts = []
+        for name, data_start, filesize, header_pos in entries:
+            if name in victims:
+                continue
+            fields = CpioUtils._parse_header(data[header_pos:header_pos + 110])
+            entry_end = data_start + filesize
+            pad2 = (4 - (filesize % 4)) % 4
+            entry_end += pad2
+            parts.append(data[header_pos:entry_end])
+        parts.append(CpioUtils._trailer_entry())
+        def _do_write():
+            with open(archive_path, "wb") as f:
+                for part in parts:
+                    f.write(part)
+        CpioUtils._write_with_retry(_do_write)
+        _debug(f"delete_tree({arcname}): removed {len(victims)} entries")
+        return len(victims)
+
+    @staticmethod
+    def rename_entry(archive_path, old, new):
+        """Move an entry, carrying its whole subtree when it is a folder.
+
+        cpio has no rename op, so this is read -> delete -> re-add under the
+        new name. Raises ValueError when the destination is already taken.
+        """
+        old = old.strip("/")
+        new = new.strip("/")
+        _debug(f"rename_entry({old} -> {new})")
+        if not old or not new or old == new:
+            return False
+        modes = {name: mode for name, mode, _size in CpioUtils.list_entries(archive_path)}
+        if old not in modes:
+            raise ValueError(f"not found in image: {old}")
+        if any(name == new or name.startswith(new + "/") for name in modes):
+            raise ValueError(f"already exists: {new}")
+        is_dir = any(name.startswith(old + "/") for name in modes)
+        prefix = old + "/"
+        moved = []
+        for name, mode, _size in CpioUtils.list_entries(archive_path):
+            if name == old:
+                dest = new
+            elif is_dir and name.startswith(prefix):
+                dest = new + "/" + name[len(prefix):]
+            else:
+                continue
+            payload = CpioUtils.read_file(archive_path, name)
+            moved.append((dest, payload if payload is not None else b"", mode))
+        if not moved:
+            raise ValueError(f"not found in image: {old}")
+        CpioUtils.delete_tree(archive_path, old)
+        CpioUtils.add_files(archive_path, moved)
+        dirs = CpioUtils.parent_dirs(new)
+        if is_dir:
+            dirs.append(new)
+        CpioUtils.ensure_dir_entries(archive_path, sorted(set(dirs)), 0o040755)
+        _debug(f"rename_entry: moved {len(moved)} entries")
+        return True
+
+    @staticmethod
+    def extract_to(archive_path, dest_dir, names=None):
+        """Write entries out to dest_dir; names=None extracts everything.
+
+        Files keep their permission bits, symlinks are recreated as symlinks,
+        and descendants of a selected folder come along automatically.
+        """
+        wanted = None if names is None else {n.strip("/") for n in names}
+        _debug(f"extract_to({dest_dir}, names={wanted})")
+        os.makedirs(dest_dir, exist_ok=True)
+        count = 0
+        for name, mode, data in CpioUtils.read_all(archive_path):
+            bare = name.strip("/")
+            if not bare or bare in (".", "..") or bare == "TRAILER!!!":
+                continue
+            if wanted is not None and not any(
+                    bare == w or bare.startswith(w + "/") for w in wanted):
+                continue
+            target = os.path.join(dest_dir, *bare.split("/"))
+            parent = os.path.dirname(target) or dest_dir
+            kind = mode & 0o170000
+            if kind == 0o040000:
+                os.makedirs(target, exist_ok=True)
+                continue
+            os.makedirs(parent, exist_ok=True)
+            if kind == 0o120000:
+                if os.path.lexists(target):
+                    os.remove(target)
+                try:
+                    os.symlink(data.decode("utf-8", errors="replace"), target)
+                except OSError:
+                    with open(target, "wb") as f:
+                        f.write(data)
+            else:
+                with open(target, "wb") as f:
+                    f.write(data)
+                try:
+                    os.chmod(target, mode & 0o7777)
+                except OSError:
+                    pass
+            count += 1
+        _debug(f"extract_to: wrote {count} entries")
+        return count
 
 
 class ApkAnalyzer:
 
     @staticmethod
-    def _run_aaptpp(args):
+    def _run_aaptpp(args_list):
         if not os.path.exists(AAPT_PP):
             return ""
         try:
-            cmd_input = f"{args}\n"
+            cmd = [AAPT_PP] + args_list
             r = subprocess.run(
-                [AAPT_PP], input=cmd_input, capture_output=True, text=True,
+                cmd, capture_output=True, text=True,
                 timeout=10, creationflags=CREATE_NO_WINDOW)
             lines = r.stdout.strip().split("\n")
             out = []
@@ -418,7 +1287,7 @@ class ApkAnalyzer:
     @staticmethod
     def get_package_name(apk_path):
         _debug(f"ApkAnalyzer.get_package_name({os.path.basename(apk_path)})")
-        raw = ApkAnalyzer._run_aaptpp(f"package {apk_path}")
+        raw = ApkAnalyzer._run_aaptpp(["package", apk_path])
         pkg = raw.strip().split("\n")[-1].strip() if raw else ""
         if pkg and "." in pkg:
             _debug(f"  -> {pkg}")
@@ -430,58 +1299,18 @@ class ApkAnalyzer:
     @staticmethod
     def get_app_label(apk_path):
         _debug(f"ApkAnalyzer.get_app_label({os.path.basename(apk_path)})")
-        raw = ApkAnalyzer._run_aaptpp(f"app-name {apk_path}")
+        raw = ApkAnalyzer._run_aaptpp(["app-name", apk_path])
         label = raw.strip().split("\n")[-1].strip() if raw else ""
         if label:
             _debug(f"  -> {label}")
             return label
         return Path(apk_path).stem
-
-    @staticmethod
-    def get_permissions(apk_path):
-        _debug(f"ApkAnalyzer.get_permissions({os.path.basename(apk_path)})")
-        raw = ApkAnalyzer._run_aaptpp(f"permissions {apk_path}")
-        if not raw:
-            return []
-        perms = []
-        for line in raw.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("android.permission.") or line.startswith("com."):
-                perms.append(line)
-        _debug(f"  -> {len(perms)} permissions")
-        return perms
-
-    @staticmethod
-    def classify_permission(perm_name):
-        if perm_name in PRIVILEGED_PERMS:
-            return "privileged"
-        perm_upper = perm_name.upper()
-        for kw in DANGEROUS_KEYWORDS:
-            if kw in perm_upper:
-                return "dangerous"
-        return "normal"
-
     @staticmethod
     def get_all_info(apk_path):
         _debug(f"ApkAnalyzer.get_all_info({os.path.basename(apk_path)})")
         pkg = ApkAnalyzer.get_package_name(apk_path)
         label = ApkAnalyzer.get_app_label(apk_path)
-        perms = ApkAnalyzer.get_permissions(apk_path)
-        result = {
-            "package": pkg,
-            "label": label,
-            "apk_path": apk_path,
-            "privileged": [],
-            "dangerous": [],
-            "normal": [],
-        }
-        for p in perms:
-            cat = ApkAnalyzer.classify_permission(p)
-            result[cat].append(p)
-        _debug(f"  privileged={len(result['privileged'])}, "
-               f"dangerous={len(result['dangerous'])}, "
-               f"normal={len(result['normal'])}")
-        return result
+        return {"package": pkg, "label": label, "apk_path": apk_path}
 
 
 class InitrdManager:
@@ -591,23 +1420,23 @@ class InitrdManager:
                     arcname = os.path.relpath(full, tmpdir).replace("\\", "/")
                     with open(full, "rb") as f:
                         data = f.read()
-                    entries_to_add.append((arcname, data, 0o100644))
+                    entries_to_add.append((arcname, data, guess_mode(arcname, data)))
             if not entries_to_add:
                 raise RuntimeError("TWRP archive is empty")
             existing = {}
             for name, _ds, _sz, _hp in CpioUtils.scan_entries(self.path):
                 existing[name] = True
             new_entries = []
-            replace_entries = []
             for arcname, data, mode in entries_to_add:
                 if arcname in existing:
-                    replace_entries.append((arcname, data, mode))
-                else:
-                    new_entries.append((arcname, data, mode))
-            for arcname, data, _mode in replace_entries:
-                CpioUtils.delete_file(self.path, arcname)
+                    _debug(f"  Replacing existing: {arcname}")
+                    CpioUtils.delete_file(self.path, arcname)
+                new_entries.append((arcname, data, mode))
             if new_entries:
                 CpioUtils.add_files(self.path, new_entries)
+            dirs = sorted({d for arcname, _d, _m in entries_to_add
+                           for d in CpioUtils.parent_dirs(arcname)})
+            CpioUtils.ensure_dir_entries(self.path, dirs, 0o040755)
             _log(f"Injected {len(entries_to_add)} files from 7z")
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -628,8 +1457,10 @@ class InitrdManager:
         if arcname in existing:
             _debug(f"  Replacing existing: {arcname}")
             CpioUtils.delete_file(self.path, arcname)
-        CpioUtils.add_file(self.path, arcname, data)
-        _log(f"Injected {arcname} ({len(data):,} bytes)")
+        mode = guess_mode(arcname, data)
+        CpioUtils.add_file(self.path, arcname, data, mode=mode)
+        CpioUtils.ensure_dir_entries(self.path, CpioUtils.parent_dirs(arcname), 0o040755)
+        _log(f"Injected {arcname} ({len(data):,} bytes, {mode & 0o7777:o})")
 
     def inject_folder(self, src_folder, dest="/"):
         _debug(f"inject_folder({src_folder}, dest={dest})")
@@ -642,7 +1473,7 @@ class InitrdManager:
                 arcname = self._dest_join(dest, rel)
                 with open(full, "rb") as f:
                     data = f.read()
-                entries_to_add.append((arcname, data, 0o100644))
+                entries_to_add.append((arcname, data, guess_mode(arcname, data)))
         existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
         new_entries = []
         for arcname, data, mode in entries_to_add:
@@ -652,6 +1483,9 @@ class InitrdManager:
             new_entries.append((arcname, data, mode))
         if new_entries:
             CpioUtils.add_files(self.path, new_entries)
+        dirs = sorted({d for arcname, _d, _m in entries_to_add
+                       for d in CpioUtils.parent_dirs(arcname)})
+        CpioUtils.ensure_dir_entries(self.path, dirs, 0o040755)
         _log(f"Injected {len(entries_to_add)} files from folder")
 
     def inject_7z_with_patch(self, seven_zip_path, dest="/"):
@@ -707,13 +1541,13 @@ class InitrdManager:
                                 arcname = f"{drop}/{pick}/{rel}".strip("/")
                                 with open(full, "rb") as f:
                                     data = f.read()
-                                entries_to_add.append((arcname, data, 0o100644))
+                                entries_to_add.append((arcname, data, guess_mode(arcname, data)))
                                 _debug(f"      -> {arcname} ({len(data):,} bytes)")
                     elif os.path.isfile(pick_full):
                         arcname = f"{drop}/{os.path.basename(pick)}".strip("/")
                         with open(pick_full, "rb") as f:
                             data = f.read()
-                        entries_to_add.append((arcname, data, 0o100644))
+                        entries_to_add.append((arcname, data, guess_mode(arcname, data)))
                         _debug(f"    Type: FILE -> {arcname} ({len(data):,} bytes)")
                     else:
                         _debug(f"    WARNING: source not found!")
@@ -727,6 +1561,9 @@ class InitrdManager:
                     new_entries.append((arcname, data, mode))
                 if new_entries:
                     CpioUtils.add_files(self.path, new_entries)
+                dirs = sorted({d for arcname, _d, _m in entries_to_add
+                               for d in CpioUtils.parent_dirs(arcname)})
+                CpioUtils.ensure_dir_entries(self.path, dirs, 0o040755)
                 _log(f"Injection complete")
             else:
                 raise RuntimeError("TWRP archive has no patch.json — rejected")
@@ -740,7 +1577,7 @@ class InitrdManager:
             _debug(f"fix.7z not found: {ASSET_FIX_7Z}")
             return False
         existing_entries = {name for name, *_ in CpioUtils.scan_entries(self.path)}
-        if "overlay.d/sbin/post-fs-data.sh" in existing_entries:
+        if POSTFSDATA_ARCNAME in existing_entries:
             _log("Magisk already installed, skipping hook infrastructure")
             return True
         if os.path.exists(FIX_TEMP):
@@ -755,7 +1592,10 @@ class InitrdManager:
             _log("Adding Magisk hook infrastructure")
 
             CpioUtils.delete_file(self.path, "init")
-            _log("  Deleted /init (fix.7z provides wsainit)")
+            _log("  Deleted /init")
+
+            CpioUtils.ensure_dir_entries(self.path, HOOK_DIRS, HOOK_DIR_MODE)
+            _log("  " + " ".join(f"{d}/" for d in HOOK_DIRS) + " (dir entries)")
 
             existing = {name for name, *_ in CpioUtils.scan_entries(self.path)}
             count = 0
@@ -763,22 +1603,125 @@ class InitrdManager:
                 for fname in files:
                     full = os.path.join(root, fname)
                     arcname = os.path.relpath(full, FIX_TEMP).replace("\\", "/")
+                    if arcname == "init":
+                        _debug(f"  Skipping {arcname} from fix.7z (will create symlink)")
+                        continue
                     if arcname in existing:
                         CpioUtils.delete_file(self.path, arcname)
                     with open(full, "rb") as f:
                         data = f.read()
-                    CpioUtils.add_file(self.path, arcname, data)
-                    _log(f"  {arcname} ({len(data):,} bytes)")
+                    if arcname == POSTFSDATA_ARCNAME:
+                        data = patch_postfsdata(data)
+                    mode = guess_mode(arcname, data)
+                    CpioUtils.add_file(self.path, arcname, data, mode=mode)
+                    _log(f"  {arcname} ({len(data):,} bytes, {mode & 0o7777:o})")
                     count += 1
 
-            CpioUtils.delete_file(self.path, "init")
-            CpioUtils.add_symlink(self.path, "/init", "lspinit")
-            _log("  /init -> symlink -> lspinit")
+            CpioUtils.ensure_dir_entries(self.path, HOOK_DIRS, HOOK_DIR_MODE)
 
-            _log(f"Injected {count + 2} files from fix.7z")
+            CpioUtils.add_symlink(self.path, "init", "lspinit")
+            _log("  init -> lspinit (symlink)")
+            count += 1
+
+            if ".backup" not in existing:
+                CpioUtils.add_file(self.path, ".backup", b"", mode=0o040755)
+                _log("  .backup/ (empty dir)")
+                count += 1
+
+            _log(f"Injected {count} files from fix.7z")
             return True
         finally:
             shutil.rmtree(FIX_TEMP, ignore_errors=True)
+
+    def hook_issues(self):
+        """Read-only audit of the installed hook. Returns a list of human
+        readable problems (empty when everything is correct)."""
+        issues = []
+        entries = CpioUtils.read_all(self.path)
+        modes = {n: m for n, m, _d in entries}
+        names = [n for n, _m, _d in entries]
+
+        for d in HOOK_DIRS:
+            if d not in names:
+                issues.append(f"missing directory entry: {d}/")
+                continue
+            di = names.index(d)
+            if any(n.startswith(d + "/") and i < di for i, n in enumerate(names)):
+                issues.append(f"directory entry out of order: {d}/")
+
+        for arcname, want in HOOK_MODES.items():
+            if arcname not in modes:
+                issues.append(f"missing entry: {arcname}")
+                continue
+            if modes[arcname] != want:
+                issues.append(
+                    f"wrong mode on {arcname}: "
+                    f"{modes[arcname] & 0o7777:o} (expected {want & 0o7777:o})")
+
+        data = {n: d for n, _m, d in entries}
+        if POSTFSDATA_ARCNAME in data:
+            if data[POSTFSDATA_ARCNAME] != patch_postfsdata(data[POSTFSDATA_ARCNAME]):
+                size = len(data[POSTFSDATA_ARCNAME])
+                issues.append(
+                    f"{POSTFSDATA_ARCNAME} missing uninstall handler "
+                    f"({size:,} bytes)")
+        return issues
+
+    def repair_hook_infrastructure(self):
+        """Fix whatever hook_issues() reported. Safe to call repeatedly."""
+        issues = self.hook_issues()
+        if not issues:
+            _debug("repair_hook_infrastructure: nothing to fix")
+            return []
+        _log("Repairing Magisk hook infrastructure")
+
+        for name, mode, data in CpioUtils.read_all(self.path):
+            want = HOOK_MODES.get(name, mode)
+            fixed = patch_postfsdata(data) if name == POSTFSDATA_ARCNAME else data
+            if mode == want and fixed == data:
+                continue
+            CpioUtils.delete_file(self.path, name)
+            CpioUtils.add_file(self.path, name, fixed, mode=want)
+            if mode != want:
+                _log(f"  {name}: mode {mode & 0o7777:o} -> {want & 0o7777:o}")
+            if fixed != data:
+                _log(f"  {name}: {len(data):,} -> {len(fixed):,} bytes "
+                     f"(uninstall handler added)")
+
+        if CpioUtils.ensure_dir_entries(self.path, HOOK_DIRS, HOOK_DIR_MODE):
+            _log("  " + " ".join(f"{d}/" for d in HOOK_DIRS) + ": directory entries inserted")
+
+        remaining = self.hook_issues()
+        if remaining:
+            _log("  WARNING: still incorrect after repair:")
+            for issue in remaining:
+                _log(f"    {issue}")
+        return issues
+
+    def override_hook_infrastructure(self):
+        """Force a full rebuild of the hook from fix.7z, discarding whatever
+        is already installed. Returns True only if the result passes hook_issues()."""
+        _debug("override_hook_infrastructure()")
+        names = [n for n, *_ in CpioUtils.scan_entries(self.path)]
+        for target in (POSTFSDATA_ARCNAME, ".backup"):
+            if target not in names:
+                continue
+            if any(n.startswith(target + "/") for n in names):
+                _debug(f"  keeping {target} (has children)")
+                continue
+            CpioUtils.delete_file(self.path, target)
+            _log(f"  Removed existing {target} (forcing rebuild)")
+            names.remove(target)
+        if not self.add_hook_infrastructure():
+            _log("Failed to rebuild Magisk hook!")
+            return False
+        remaining = self.hook_issues()
+        if remaining:
+            _log("  WARNING: rebuild left problems:")
+            for issue in remaining:
+                _log(f"    {issue}")
+            return False
+        return True
 
     @staticmethod
     def get_package_name(apk_path):
@@ -843,8 +1786,8 @@ class InitrdManager:
         os.makedirs(LSP_TEMP, exist_ok=True)
         try:
             module_prop = (
-                "id=wsa-installer\n"
-                "name=WSA Installer\n"
+                f"id={LSP_MOD_ID}\n"
+                f"name={LSP_MOD_NAME}\n"
                 "version=v1.0\n"
                 "versionCode=1\n"
                 "author=MR CYBER\n"
@@ -854,6 +1797,9 @@ class InitrdManager:
                 f.write(module_prop)
             post_fs_data = (
                 "#!/bin/sh\n"
+                "LOGFILE=\"$(dirname \"$0\")/post-fs-data.log\"\n"
+                "log() { echo \"[$(date '+%Y-%m-%d %H:%M:%S')] $1\" | tee -a \"$LOGFILE\"; }\n"
+                "log \"=== post-fs-data.sh start ===\"\n"
                 'BASE="$(dirname "$0")"\n'
                 "NVBASE=/data/adb\n"
                 'MOD_UPDATE_DIRNAME=modules_update\n'
@@ -864,62 +1810,110 @@ class InitrdManager:
                 'MODID=$(grep_prop id "$BASE"/module.prop)\n'
                 'MOD_UPDATE_PATH=$MODULE_UPDATE_ROOT/$MODID\n'
                 'MOD_PATH=$NVBASE/modules/$MODID\n'
+                "log \"MODID=$MODID\"\n"
+                "log \"BASE=$BASE\"\n"
+                "log \"MOD_PATH=$MOD_PATH\"\n"
+                "log \"MOD_UPDATE_PATH=$MOD_UPDATE_PATH\"\n"
                 'mkdir -p -m 0755 "$MOD_PATH"\n'
                 'chcon u:object_r:system_file:s0 "$MOD_PATH"\n'
+                "log \"Created MOD_PATH\"\n"
                 'cp -dr --preserve=all "$BASE/module.prop" "$MOD_PATH"\n'
                 'chown root:root "$MOD_PATH/module.prop"\n'
                 'chmod 644 "$MOD_PATH/module.prop"\n'
                 'touch "$MOD_PATH/update"\n'
+                "log \"Copied module.prop to MOD_PATH\"\n"
                 'mkdir -p -m 0755 "$MOD_UPDATE_PATH"\n'
                 'chcon u:object_r:system_file:s0 "$MOD_UPDATE_PATH"\n'
                 'cp -dr --preserve=all "$BASE/module.prop" "$MOD_UPDATE_PATH"\n'
                 'chown root:root "$MOD_UPDATE_PATH/module.prop"\n'
                 'chmod 644 "$MOD_UPDATE_PATH/module.prop"\n'
+                "log \"Copied module.prop to MOD_UPDATE_PATH\"\n"
                 'cp -dr --preserve=all "$BASE/system" "$MOD_UPDATE_PATH"\n'
                 'find "$MOD_UPDATE_PATH/system" -type d -exec chmod 755 {} +\n'
                 'find "$MOD_UPDATE_PATH/system" -type f -exec chmod 644 {} +\n'
                 'find "$MOD_UPDATE_PATH/system" -type f -exec chown root:root {} +\n'
+                "log \"Copied system/ to MOD_UPDATE_PATH\"\n"
                 'if [ -f "$BASE/service.sh" ]; then\n'
                 '    cp -dr --preserve=all "$BASE/service.sh" "$MOD_UPDATE_PATH"\n'
                 '    chown root:root "$MOD_UPDATE_PATH/service.sh"\n'
                 '    chmod 755 "$MOD_UPDATE_PATH/service.sh"\n'
+                "    log \"Copied service.sh to MOD_UPDATE_PATH\"\n"
                 'fi\n'
                 'if [ -d "$BASE/permissions" ]; then\n'
                 '    cp -dr --preserve=all "$BASE/permissions" "$MOD_UPDATE_PATH"\n'
                 '    find "$MOD_UPDATE_PATH/permissions" -type f -exec chmod 644 {} +\n'
                 '    find "$MOD_UPDATE_PATH/permissions" -type f -exec chown root:root {} +\n'
+                "    log \"Copied permissions/ to MOD_UPDATE_PATH\"\n"
                 'fi\n'
+                "log \"=== post-fs-data.sh end ===\"\n"
             )
             with open(os.path.join(LSP_TEMP, "post-fs-data.sh"), "w", newline="") as f:
                 f.write(post_fs_data)
+            _debug("  Injected post-fs-data.sh with logging")
 
             service_sh = (
                 "#!/system/bin/sh\n"
+                "LOGFILE=\"$(dirname \"$0\")/service.log\"\n"
+                "log() { echo \"[$(date '+%Y-%m-%d %H:%M:%S')] $1\" | tee -a \"$LOGFILE\"; }\n"
+                "log \"=== service.sh start ===\"\n"
                 "MODDIR=${0%/*}\n"
                 "PERM_DIR=\"$MODDIR/permissions\"\n"
+                "log \"MODDIR=$MODDIR\"\n"
+                "log \"PERM_DIR=$PERM_DIR\"\n"
                 "\n"
                 "while [ \"$(getprop sys.boot_completed)\" != \"1\" ]; do sleep 1; done\n"
                 "sleep 3\n"
+                "log \"Boot completed, processing profiles...\"\n"
                 "\n"
+                "COUNT=0\n"
+                "GRANTED=0\n"
+                "ENABLED=0\n"
                 "for profile in \"$PERM_DIR\"/*.json; do\n"
                 "    [ -f \"$profile\" ] || continue\n"
                 "    PKG=$(basename \"$profile\" .json)\n"
+                "    COUNT=$((COUNT + 1))\n"
+                "    log \"--- Processing: $PKG ---\"\n"
                 "\n"
-                "    pm list packages 2>/dev/null | grep -q \"package:$PKG\" || continue\n"
+                "    if ! pm list packages 2>/dev/null | grep -q \"package:$PKG\"; then\n"
+                "        log \"SKIP: $PKG not installed\"\n"
+                "        continue\n"
+                "    fi\n"
+                "    log \"FOUND: $PKG is installed\"\n"
                 "\n"
+                "    log \"Granting runtime permissions...\"\n"
                 "    grep -o '\"android\\.[^\"]*\"' \"$profile\" | tr -d '\"' | while read perm; do\n"
-                "        pm grant \"$PKG\" \"$perm\" 2>/dev/null\n"
+                "        if pm grant \"$PKG\" \"$perm\" 2>/dev/null; then\n"
+                "            log \"  GRANTED: $perm\"\n"
+                "        else\n"
+                "            log \"  SKIP: $perm (already granted or not applicable)\"\n"
+                "        fi\n"
+                "        GRANTED=$((GRANTED + 1))\n"
                 "    done\n"
                 "\n"
                 "    if grep -q '\"hide_disable\": *true' \"$profile\"; then\n"
-                "        pm enable \"$PKG\" 2>/dev/null\n"
+                "        if pm enable \"$PKG\" 2>/dev/null; then\n"
+                "            log \"ENABLED: $PKG\"\n"
+                "            ENABLED=$((ENABLED + 1))\n"
+                "        else\n"
+                "            log \"ENABLE SKIP: $PKG (already enabled)\"\n"
+                "        fi\n"
                 "    fi\n"
                 "\n"
-                "    magisk resetprop -n \"persist.sys.priapp.$PKG\" \"1\" 2>/dev/null\n"
+                "    if magisk resetprop -n \"persist.sys.priapp.$PKG\" \"1\" 2>/dev/null; then\n"
+                "        log \"RESETPROP: persist.sys.priapp.$PKG=1\"\n"
+                "    else\n"
+                "        log \"RESETPROP SKIP: $PKG (magisk not available)\"\n"
+                "    fi\n"
+                "\n"
+                "    log \"--- Done: $PKG ---\"\n"
                 "done\n"
+                "\n"
+                "log \"Summary: profiles=$COUNT granted=$GRANTED enabled=$ENABLED\"\n"
+                "log \"=== service.sh end ===\"\n"
             )
             with open(os.path.join(LSP_TEMP, "service.sh"), "w", newline="") as f:
                 f.write(service_sh)
+            _debug("  Injected service.sh with logging")
 
             all_privapp = []
             all_runtime = []
@@ -951,17 +1945,17 @@ class InitrdManager:
                 xml_dir = os.path.join(LSP_TEMP, "system", "etc", "permissions")
                 os.makedirs(xml_dir, exist_ok=True)
                 xml = self.generate_privapp_xml(pkg, all_privapp)
-                with open(os.path.join(xml_dir, "privapp-permissions-wsa-installer.xml"), "w", newline="") as f:
+                with open(os.path.join(xml_dir, LSP_PRIV_XML), "w", newline="") as f:
                     f.write(xml)
-                _debug(f"  Generated privapp-permissions-wsa-installer.xml ({len(all_privapp)} perms)")
+                _debug(f"  Generated {LSP_PRIV_XML} ({len(all_privapp)} perms)")
 
             if all_runtime:
                 xml_dir = os.path.join(LSP_TEMP, "system", "etc", "default-permissions")
                 os.makedirs(xml_dir, exist_ok=True)
                 xml = self.generate_default_xml(pkg, all_runtime, all_fixed)
-                with open(os.path.join(xml_dir, "default-permissions-wsa-installer.xml"), "w", newline="") as f:
+                with open(os.path.join(xml_dir, LSP_DEF_XML), "w", newline="") as f:
                     f.write(xml)
-                _debug(f"  Generated default-permissions-wsa-installer.xml ({len(all_runtime)} perms)")
+                _debug(f"  Generated {LSP_DEF_XML} ({len(all_runtime)} perms)")
 
             image_path = os.path.join(INJECT_TEMP, LSP_IMAGE_NAME)
             result = subprocess.run(
@@ -1019,8 +2013,174 @@ class InitrdManager:
             CpioUtils.add_file(self.path, arcname, image_data)
             _log(f"Repacked {LSP_IMAGE_NAME} ({len(image_data):,} bytes)")
             return True
+        except PermissionError:
+            _debug("File locked, using temp copy approach")
+            return self._repack_lsp_image_via_temp(extract_dir)
         finally:
             shutil.rmtree(LSP_TEMP, ignore_errors=True)
+
+    def _repack_lsp_image_via_temp(self, extract_dir):
+        import tempfile
+        image_path = os.path.join(INJECT_TEMP, LSP_IMAGE_NAME)
+        result = subprocess.run(
+            [IMG_CREATER, "-zlz4hc,9", image_path, extract_dir],
+            capture_output=True, text=True, timeout=60,
+            creationflags=CREATE_NO_WINDOW)
+        if result.returncode != 0:
+            raise RuntimeError(f"img-creater failed: {result.stderr}")
+        with open(image_path, "rb") as f:
+            image_data = f.read()
+        arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
+        tmp_initrd = tempfile.mktemp(suffix=".img")
+        shutil.copy2(self.path, tmp_initrd)
+        if CpioUtils.has_file(tmp_initrd, arcname):
+            CpioUtils.delete_file(tmp_initrd, arcname)
+        CpioUtils.add_file(tmp_initrd, arcname, image_data)
+        def _do_replace():
+            try:
+                os.remove(self.path)
+            except PermissionError:
+                if WSADetector.is_running():
+                    KillWSA.kill_all()
+                    time.sleep(3)
+                os.remove(self.path)
+            shutil.copy2(tmp_initrd, self.path)
+        CpioUtils._write_with_retry(_do_replace)
+        try:
+            os.remove(tmp_initrd)
+        except Exception:
+            pass
+        _log(f"Repacked {LSP_IMAGE_NAME} ({len(image_data):,} bytes)")
+        return True
+
+    def inject_uninstall_txt(self, packages):
+        content = "\n".join(packages) + "\n"
+        arcname = "overlay.d/sbin/uninstall.txt"
+        CpioUtils.delete_file(self.path, arcname)
+        CpioUtils.add_file(self.path, arcname, content.encode("utf-8"))
+        _log(f"Injected uninstall.txt ({len(packages)} packages)")
+
+    def patch_postfsdata_uninstall(self):
+        arcname = "overlay.d/sbin/post-fs-data.sh"
+
+        user_log_block = ""
+        if LOG_FOR_USER:
+            user_log_block = (
+                "    mkdir -p '/storage/emulated/0/WSA Installer'\n"
+                '    USER_LOG="/storage/emulated/0/WSA Installer/post-fs-data.log"\n'
+                '    cp -f "$EARLY_LOG" "$USER_LOG" 2>/dev/null\n'
+            )
+
+        root_transition = (
+            '    printf "[%s] [Root] Android boot complete, copying log to user path and starting uninstallation\\n" "$(date \'+%Y-%m-%d %H:%M:%S\')" >> "$EARLY_LOG"\n'
+        )
+        if LOG_FOR_USER:
+            root_transition += (
+                '    printf "[%s] [Root] Android boot complete, copying log to user path and starting uninstallation\\n" "$(date \'+%Y-%m-%d %H:%M:%S\')" >> "$USER_LOG"\n'
+            )
+
+        log_fn = (
+            '    log_uninstall() {\n'
+            '        printf "[%s] [User] %s\\n" "$(date \'+%Y-%m-%d %H:%M:%S\')" "$1" >> "$EARLY_LOG"\n'
+        )
+        if LOG_FOR_USER:
+            log_fn += '        printf "[%s] [User] %s\\n" "$(date \'+%Y-%m-%d %H:%M:%S\')" "$1" >> "$USER_LOG"\n'
+        log_fn += "    }\n"
+
+        uninstall_block = (
+            "# --- TWRP uninstall handler (background) ---\n"
+            "(\n"
+            '    while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 1; done\n'
+            "    sleep 5\n"
+            '    EARLY_LOG="$(dirname "$0")/post-fs-data.log"\n'
+            + user_log_block
+            + root_transition
+            + log_fn
+            + '    UNINSTALL_FILE="$(dirname "$0")/uninstall.txt"\n'
+            '    if [ -f "$UNINSTALL_FILE" ]; then\n'
+            '        log_uninstall "=== TWRP Uninstall start ==="\n'
+            "        while IFS= read -r PKG; do\n"
+            '            [ -z "$PKG" ] && continue\n'
+            '            log_uninstall "UNINSTALL: $PKG"\n'
+            '            if pm uninstall "$PKG" 2>/dev/null; then\n'
+            '                log_uninstall "  UNINSTALLED: $PKG"\n'
+            "            else\n"
+            '                log_uninstall "  FAILED: $PKG"\n'
+            "            fi\n"
+            "        done < \"$UNINSTALL_FILE\"\n"
+            "        rm -f \"$UNINSTALL_FILE\"\n"
+            '        log_uninstall "=== TWRP Uninstall complete ==="\n'
+            "    fi\n"
+            ") &\n"
+            "# --- end TWRP uninstall handler ---\n"
+        )
+
+        full_script = (
+            "#!/bin/sh\n"
+            'LOGFILE="$(dirname "$0")/post-fs-data.log"\n'
+            'log() { printf "[%s] [Root] %s\\n" "$(date \'+%Y-%m-%d %H:%M:%S\')" "$1" >> "$LOGFILE"; }\n'
+            'log "=== post-fs-data.sh start ==="\n'
+            "MAGISKTMP=/sbin\n"
+            "[ -d /sbin ] || MAGISKTMP=/debug_ramdisk\n"
+            'log "MAGISKTMP=$MAGISKTMP"\n'
+            "MAGISKBIN=/data/adb/magisk\n"
+            "if [ ! -d /data/adb ]; then\n"
+            "    mkdir -m 700 /data/adb\n"
+            '    chcon u:object_r:adb_data_file:s0 /data/adb\n'
+            '    log "Created /data/adb"\n'
+            "fi\n"
+            "if [ ! -d $MAGISKBIN ]; then\n"
+            "    mkdir -p -m 755 $MAGISKBIN\n"
+            '    chcon u:object_r:system_file:s0 $MAGISKBIN\n'
+            '    log "Created $MAGISKBIN"\n'
+            "fi\n"
+            "ABI=$(getprop ro.product.cpu.abi)\n"
+            'log "ABI=$ABI"\n'
+            "for file in busybox magiskpolicy magiskboot magiskinit; do\n"
+            '    [ -x "$MAGISKBIN/$file" ] || {\n'
+            '        unzip -d $MAGISKBIN -oj $MAGISKTMP/stub.apk "lib/$ABI/lib$file.so"\n'
+            '        mv $MAGISKBIN/lib$file.so $MAGISKBIN/$file\n'
+            '        chmod 755 "$MAGISKBIN/$file"\n'
+            '        log "Extracted $file"\n'
+            "    }\n"
+            "done\n"
+            "for file in util_functions.sh boot_patch.sh; do\n"
+            '    [ -x "$MAGISKBIN/$file" ] || {\n'
+            '        unzip -d $MAGISKBIN -oj $MAGISKTMP/stub.apk "assets/$file"\n'
+            '        chmod 755 "$MAGISKBIN/$file"\n'
+            '        log "Extracted $file"\n'
+            "    }\n"
+            "done\n"
+            'for file in "$MAGISKTMP"/*; do\n'
+            '    if echo "$file" | grep -Eq "lsp_.+\\.img"; then\n'
+            '        foldername=$(basename "$file" .img)\n'
+            '        mkdir -p "$MAGISKTMP/$foldername"\n'
+            '        mount -t auto -o ro,loop "$file" "$MAGISKTMP/$foldername"\n'
+            '        log "Mounted $file -> $MAGISKTMP/$foldername"\n'
+            '        "$MAGISKTMP/$foldername/post-fs-data.sh" &\n'
+            "    fi\n"
+            "done\n"
+            "wait\n"
+            'log "All post-fs-data.sh scripts completed"\n'
+            'for file in "$MAGISKTMP"/*; do\n'
+            '    if echo "$file" | grep -Eq "lsp_.+\\.img"; then\n'
+            '        foldername=$(basename "$file" .img)\n'
+            '        umount "$MAGISKTMP/$foldername"\n'
+            '        log "Unmounted $MAGISKTMP/$foldername"\n'
+            '        rm -rf "${MAGISKTMP:?}/${foldername:?}"\n'
+            '        rm -f "$file"\n'
+            "    fi\n"
+            "done\n"
+            'log "Cleanup complete"\n'
+            'log "=== post-fs-data.sh end ==="\n'
+            "\n"
+            + uninstall_block
+        )
+
+        CpioUtils.delete_file(self.path, arcname)
+        CpioUtils.add_file(self.path, arcname, full_script.encode("utf-8"))
+        _log("Replaced post-fs-data.sh with full version + uninstall handler")
+        return True
 
     def find_existing_apks(self):
         _debug("find_existing_apks()")
@@ -1039,6 +2199,43 @@ class InitrdManager:
         shutil.rmtree(LSP_TEMP, ignore_errors=True)
         _debug(f"find_existing_apks: {result}")
         return result
+
+    def list_tree(self):
+        """[(name, mode, size)] for every entry, for the IMG Manager tree."""
+        _debug("list_tree()")
+        return CpioUtils.list_entries(self.path)
+
+    def overwrite(self, arcname, file_data, mode=None):
+        _debug(f"overwrite({arcname})")
+        CpioUtils.overwrite_file(self.path, arcname, file_data, mode=mode)
+
+    def delete_entries(self, names):
+        _debug(f"delete_entries({len(names)})")
+        removed = 0
+        for name in names:
+            removed += CpioUtils.delete_tree(self.path, name)
+        _log(f"Deleted {removed} entries")
+        return removed
+
+    def rename(self, old, new):
+        _debug(f"rename({old} -> {new})")
+        CpioUtils.rename_entry(self.path, old, new)
+        _log(f"Renamed {old} -> {new}")
+
+    def extract(self, dest_dir, names=None):
+        _debug(f"extract({dest_dir}, names={names})")
+        count = CpioUtils.extract_to(self.path, dest_dir, names)
+        _log(f"Extracted {count} entries to {dest_dir}")
+        return count
+
+    def new_folder(self, arcname):
+        arcname = arcname.strip("/")
+        _debug(f"new_folder({arcname})")
+        if CpioUtils.has_file(self.path, arcname):
+            raise ValueError(f"already exists: {arcname}")
+        dirs = CpioUtils.parent_dirs(arcname) + [arcname]
+        CpioUtils.ensure_dir_entries(self.path, sorted(set(dirs)), 0o040755)
+        _log(f"Created folder {arcname}")
 
 
 class WSADetector:
@@ -1416,12 +2613,14 @@ class PermissionManagerSignals(QObject):
 class PermissionManagerWindow(QWidget):
 
     PM_W = 640
+    PM_H = 500
     PM_HDR_H = 44
     PM_RADIUS = 16
     ROW_H = 28
     LOCK_W = 24
+    PERM_BOX_H = 240
 
-    def __init__(self, package_name, app_label, permissions_by_category, parent=None):
+    def __init__(self, package_name, app_label, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -1434,32 +2633,35 @@ class PermissionManagerWindow(QWidget):
         self._chk_hide_uninstall = True
         self._chk_hide_disable = True
         self._perm_checks = []
-        for perm in permissions_by_category.get("privileged", []):
+        self._scroll_y = 0
+        seen = set()
+        for perm in sorted(PRIVILEGED_PERMS):
+            if perm in seen:
+                continue
+            seen.add(perm)
             self._perm_checks.append({"perm": perm, "checked": True, "locked": True, "greyed": False, "cat": "privileged"})
-        for perm in permissions_by_category.get("dangerous", []):
-            self._perm_checks.append({"perm": perm, "checked": True, "locked": False, "greyed": False, "cat": "dangerous"})
-        for perm in permissions_by_category.get("normal", []):
+        for perm in DANGEROUS_PERMS:
+            if perm in seen:
+                continue
+            seen.add(perm)
+            self._perm_checks.append({"perm": perm, "checked": True, "locked": True, "greyed": False, "cat": "dangerous"})
+        for perm in SPECIAL_PERMS:
+            if perm in seen:
+                continue
+            seen.add(perm)
+            self._perm_checks.append({"perm": perm, "checked": True, "locked": False, "greyed": False, "cat": "special"})
+        for perm in NORMAL_PERMS:
+            if perm in seen:
+                continue
+            seen.add(perm)
             self._perm_checks.append({"perm": perm, "checked": False, "locked": False, "greyed": True, "cat": "normal"})
-        self._calc_height()
+        self._pm_h = self.PM_H
         self.setFixedSize(self.PM_W, self._pm_h)
         self._build_layout()
-
-    def _calc_height(self):
-        chk_h = 30
-        y = self.PM_HDR_H + 8
-        y += 32
-        y += chk_h * 2 + 18
-        y += 24
-        perm_count = len(self._perm_checks)
-        perm_box_h = max(perm_count, 1) * self.ROW_H + 16
-        y += perm_box_h + 12
-        y += 50
-        self._pm_h = max(y + 30, 300)
 
     def _build_layout(self):
         cx = self.PM_W - 10 - 24
         self._close_rect = (cx, 10, 24, 24)
-        chk_h = 30
         y = self.PM_HDR_H + 8
         self._app_label_y = y
         y += 32
@@ -1467,19 +2669,26 @@ class PermissionManagerWindow(QWidget):
         y += 22
         self._prot_box_y = y
         self._prot_chk1_y = y + 9
-        self._prot_chk2_y = y + 9 + chk_h
-        y += chk_h * 2 + 18
+        self._prot_chk2_y = y + 9 + 30
+        y += 30 * 2 + 18
         self._perm_label_y = y
         y += 24
         self._perm_box_y = y
         self._perm_content_y = y + 8
-        perm_count = len(self._perm_checks)
-        perm_box_h = max(perm_count, 1) * self.ROW_H + 16
-        self._perm_box_h = perm_box_h
-        y += perm_box_h + 12
+        self._perm_box_h = self.PERM_BOX_H
         btn_y = self._pm_h - 50
         self._btn_ok_rect = (self.PM_W // 2 - 130, btn_y, 120, 36)
         self._btn_cancel_rect = (self.PM_W // 2 + 10, btn_y, 120, 36)
+
+    def _max_scroll(self):
+        content_h = len(self._perm_checks) * self.ROW_H + 16
+        return max(0, content_h - self._perm_box_h)
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        self._scroll_y -= delta // 3
+        self._scroll_y = max(0, min(self._scroll_y, self._max_scroll()))
+        self.update()
 
     def _on_ok(self):
         self._signals.result_ready.emit(self.get_result())
@@ -1494,8 +2703,8 @@ class PermissionManagerWindow(QWidget):
             "hide_uninstall": self._chk_hide_uninstall,
             "hide_disable": self._chk_hide_disable,
             "privapp_perms": [it["perm"] for it in self._perm_checks if it["checked"] and it["cat"] == "privileged"],
-            "runtime_perms": [it["perm"] for it in self._perm_checks if it["checked"] and it["cat"] == "dangerous"],
-            "fixed_runtime_perms": [it["perm"] for it in self._perm_checks if it["checked"] and it["locked"] and it["cat"] == "dangerous"],
+            "runtime_perms": [it["perm"] for it in self._perm_checks if it["checked"] and it["cat"] in ("dangerous", "special")],
+            "fixed_runtime_perms": [it["perm"] for it in self._perm_checks if it["checked"] and it["locked"] and it["cat"] in ("dangerous", "special")],
         }
 
     @staticmethod
@@ -1568,7 +2777,7 @@ class PermissionManagerWindow(QWidget):
         p.setClipRect(QRectF(14, self._perm_box_y + 4, self.PM_W - 28, self._perm_box_h - 8))
         row_h = self.ROW_H
         for i, item in enumerate(self._perm_checks):
-            cy = self._perm_content_y + i * row_h
+            cy = self._perm_content_y + i * row_h - self._scroll_y
             if item["greyed"]:
                 p.setPen(QColor(100, 100, 100))
                 p.setFont(self._font(11))
@@ -1686,7 +2895,7 @@ class PermissionManagerWindow(QWidget):
             return "prot_uninstall"
         for i in range(len(self._perm_checks)):
             px = 20
-            py = self._perm_content_y + i * self.ROW_H
+            py = self._perm_content_y + i * self.ROW_H - self._scroll_y
             lock_x = self.PM_W - 60
             if lock_x <= ref.x() <= lock_x + self.LOCK_W and py <= ref.y() <= py + self.ROW_H:
                 if not self._perm_checks[i]["greyed"] and self._perm_checks[i]["checked"]:
@@ -1748,6 +2957,2031 @@ class PermissionManagerWindow(QWidget):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._drag_offset = None
+
+
+class ScriptEditorDialog(QDialog):
+    """In-app text editor for scripts stored inside the image."""
+
+    _STYLE = """
+        QDialog { background: #171a21; color: #e6e9ef; }
+        QLabel { background: transparent; color: #8a93a6; font-size: 11px; }
+        QPlainTextEdit {
+            background: #12151c; color: #e6e9ef;
+            border: 1px solid #2b3242; border-radius: 6px;
+            selection-background-color: #2f5f9e; selection-color: #ffffff;
+        }
+        QPushButton {
+            background: #232838; color: #e6e9ef;
+            border: 1px solid #3a4150; border-radius: 5px;
+            padding: 5px 16px; font-size: 12px;
+        }
+        QPushButton:hover { background: #2c3346; border-color: #5a6478; }
+    """
+
+    def __init__(self, arcname, data, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit \u2014 {arcname}")
+        self.setStyleSheet(self._STYLE)
+        self.resize(780, 560)
+        self.setMinimumSize(520, 360)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(8)
+
+        outer.addWidget(QLabel(f"/{arcname}   \u00b7   saving writes to the staged image"))
+
+        self._edit = QPlainTextEdit()
+        self._edit.setPlainText(data.decode("utf-8", errors="replace"))
+        editor_font = QFont("Consolas")
+        editor_font.setPixelSize(13)
+        self._edit.setFont(editor_font)
+        self._edit.setLineWrapMode(QPlainTextEdit.NoWrap)
+        outer.addWidget(self._edit, 1)
+
+        self._status = QLabel("")
+        outer.addWidget(self._status)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel = QPushButton("Cancel")
+        save = QPushButton("Save")
+        save.setStyleSheet("""
+            QPushButton {
+                background: #1558b0; color: #ffffff;
+                border: 1px solid #2f7ad6; border-radius: 5px;
+                padding: 5px 16px; font-weight: bold;
+            }
+            QPushButton:hover { background: #1a67ca; }
+        """)
+        save.setDefault(True)
+        cancel.clicked.connect(self.reject)
+        save.clicked.connect(self.accept)
+        row.addWidget(cancel)
+        row.addWidget(save)
+        outer.addLayout(row)
+
+        self._edit.textChanged.connect(self._update_status)
+        self._update_status()
+
+    def _update_status(self):
+        text = self._edit.toPlainText()
+        self._status.setText(
+            f"{text.count(chr(10)) + 1} lines \u00b7 {len(text)} chars")
+
+    def result_bytes(self):
+        return self._edit.toPlainText().encode("utf-8")
+
+
+class ArchiveViewerDialog(QDialog):
+    """Browse an archive that lives inside the image without leaving the app.
+
+    Understands cpio (native), gzip/xz/bz2 (stdlib) including when they wrap
+    a cpio or tar, plus zip, tar and 7z through the bundled 7z.exe.
+    """
+
+    _STYLE = """
+        QDialog { background: #171a21; color: #e6e9ef; }
+        QLabel { background: transparent; color: #8a93a6; font-size: 11px; }
+        QTreeWidget {
+            background: #12151c; alternate-background-color: #171b24;
+            color: #e6e9ef; border: 1px solid #2b3242;
+            border-radius: 6px; outline: 0; font-size: 12px;
+        }
+        QTreeWidget::item { padding: 2px 4px; }
+        QTreeWidget::item:selected { background: #2f5f9e; color: #ffffff; }
+        QHeaderView::section {
+            background: #1c2130; color: #aab2c5;
+            border: none; border-right: 1px solid #2b3242;
+            border-bottom: 1px solid #2b3242;
+            padding: 4px 6px; font-size: 11px;
+        }
+        QPushButton {
+            background: #232838; color: #e6e9ef;
+            border: 1px solid #3a4150; border-radius: 5px;
+            padding: 5px 16px; font-size: 12px;
+        }
+        QPushButton:hover { background: #2c3346; border-color: #5a6478; }
+        QPushButton:disabled { background: #1a1e27; color: #5b6272; border-color: #262b36; }
+    """
+
+    _DEPTH_LIMIT = 4
+
+    @staticmethod
+    def sniff(data, name=""):
+        """Format tag for `data` from its MAGIC ONLY, or None.
+
+        The file name is deliberately ignored: trusting an extension fed
+        non-xz bytes to lzma, which raised "Input format not supported by
+        decoder" on entries 7-Zip opened fine.
+        """
+        if not data:
+            return None
+        if data[:6] in (b"070701", b"070702", b"070707"):
+            return "cpio"
+        if data[:2] == b"\x1f\x8b":
+            return "gzip"
+        if data[:6] == b"\xfd7zXZ\x00":
+            return "xz"
+        if data[:3] == b"BZh":
+            return "bz2"
+        if data[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
+            return "zip"
+        if data[:6] == b"7z\xbc\xaf\x27\x1c":
+            return "7z"
+        if data[:4] == b"\x04\x22\x4d\x18":
+            return "lz4"
+        if data[:4] == b"\x28\xb5\x2f\xfd":
+            return "zstd"
+        if data[257:262] == b"ustar":
+            return "tar"
+        return None
+
+    def __init__(self, arcname, data, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Archive \u2014 {arcname}")
+        self.setStyleSheet(self._STYLE)
+        self.resize(820, 560)
+        self.setMinimumSize(520, 360)
+
+        self._arcname = arcname
+        self._entries = []
+        self._extract = None
+        self._error = None
+        self._used_7z = False
+        self._temp_files = []
+        self._keepalive = None
+        # compression wrappers peeled off outermost-first ("gz", "xz", ...)
+        # and the inner container we can rebuild ("cpio" / "zip" / "tar")
+        self._layers = []
+        self._container = None
+        # arcname -> original cpio/zip/tar mode, so untouched entries keep
+        # their permission bits and symlinks survive the round trip
+        self._modes = {}
+        self._packed = None
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(8)
+
+        self._header = QLabel("")
+        outer.addWidget(self._header)
+
+        self._tree = QTreeWidget()
+        self._tree.setColumnCount(3)
+        self._tree.setHeaderLabels(["Name", "Size", "Type"])
+        self._tree.setAlternatingRowColors(True)
+        self._tree.setUniformRowHeights(True)
+        self._tree.setRootIsDecorated(False)
+        self._tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        hdr = self._tree.header()
+        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
+        for col in (1, 2):
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        outer.addWidget(self._tree, 1)
+
+        row = QHBoxLayout()
+        self._hint = QLabel(
+            "Read-only preview \u00b7 extraction writes outside the image")
+        row.addWidget(self._hint)
+        row.addStretch(1)
+        close_btn = QPushButton("Close")
+        self._extract_btn = QPushButton("Extract\u2026")
+        self._edit_btn = QPushButton("Edit\u2026")
+        for btn in (self._extract_btn, self._edit_btn):
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: #1558b0; color: #ffffff;
+                    border: 1px solid #2f7ad6; border-radius: 5px;
+                    padding: 5px 16px; font-weight: bold;
+                }
+                QPushButton:hover { background: #1a67ca; }
+                QPushButton:disabled { background: #1a1e27; color: #5b6272; border-color: #262b36; }
+            """)
+        close_btn.clicked.connect(self.reject)
+        self._extract_btn.clicked.connect(self._on_extract)
+        self._edit_btn.clicked.connect(self._on_edit)
+        row.addWidget(close_btn)
+        row.addWidget(self._extract_btn)
+        row.addWidget(self._edit_btn)
+        outer.addLayout(row)
+
+        try:
+            self._open_payload(data)
+        except Exception as exc:
+            self._error = str(exc)
+        self._fill()
+
+    # ------------------------------------------------------------- loading
+
+    def error(self):
+        return self._error
+
+    def editable(self):
+        """True when we can rebuild the archive after editing its contents."""
+        return (self._container in ("cpio", "zip", "tar")
+                and self._extract is not None and not self._error)
+
+    def result_bytes(self):
+        """Bytes the user packed through Edit\u2026, else None."""
+        return self._packed
+
+    def _open_payload(self, data, depth=0):
+        """stdio first, then 7-Zip, then a real error with both messages."""
+        kind = self.sniff(data, self._arcname)
+        errors = []
+        try:
+            self._open_stdlib(data, depth)
+            return
+        except Exception as exc:
+            errors.append(f"built-in decoder: {exc}")
+            # a half-opened backend must not leak into the 7-Zip retry
+            self._entries = []
+            self._extract = None
+            self._keepalive = None
+            self._layers = []
+            self._container = None
+            self._modes = {}
+        if kind != "7z":
+            try:
+                self._open_kind("7z", data)
+                self._used_7z = True
+                return
+            except Exception as exc:
+                errors.append(f"7-Zip: {exc}")
+        raise ValueError(
+            f'"{self._arcname}" could not be opened.\n\n'
+            + "\n".join(errors))
+
+    def _open_stdlib(self, data, depth=0):
+        kind = self.sniff(data, self._arcname)
+        if kind in ("gzip", "xz", "bz2"):
+            if depth >= self._DEPTH_LIMIT:
+                raise ValueError("Compression nesting is too deep.")
+            self._layers.append(kind)
+            if kind == "gzip":
+                data = gzip.decompress(data)
+            elif kind == "xz":
+                data = lzma.decompress(data)
+            else:
+                data = bz2.decompress(data)
+            self._open_stdlib(data, depth + 1)
+            return
+        if kind in ("cpio", "zip", "tar", "7z"):
+            self._open_kind(kind, data)
+            return
+        raise ValueError("format not recognised by the built-in decoders")
+
+    def _stage_temp(self, suffix):
+        handle, path = tempfile.mkstemp(suffix=suffix)
+        os.close(handle)
+        self._temp_files.append(path)
+        return path
+
+    def _open_kind(self, kind, data):
+        if kind == "cpio":
+            path = self._stage_temp(".cpio")
+            with open(path, "wb") as handle:
+                handle.write(data)
+            rows = CpioUtils.list_entries(path)
+            self._entries = [
+                (name.strip("/"), size, (mode & 0o170000) == 0o040000)
+                for name, mode, size in rows
+                if name.strip("/") and name.strip("/") != "TRAILER!!!"
+            ]
+            self._extract = lambda dest, p=path: CpioUtils.extract_to(p, dest)
+            self._container = "cpio"
+            self._modes = {
+                name.strip("/"): mode for name, mode, size in rows
+                if name.strip("/") and name.strip("/") != "TRAILER!!!"
+            }
+            return
+
+        if kind == "zip":
+            zf = zipfile.ZipFile(io.BytesIO(data))
+            self._keepalive = zf
+            self._entries = [(i.filename, i.file_size, i.is_dir())
+                             for i in zf.infolist() if i.filename]
+            self._extract = zf.extractall
+            self._container = "zip"
+            # external_attr >> 16 is 0 on zips written by Windows tools;
+            # _file_perms() then falls back to guess_mode(). Zip stores folder
+            # names with a trailing slash -- strip it so they match _walk_dir().
+            self._modes = {i.filename.rstrip("/"): (i.external_attr >> 16)
+                           for i in zf.infolist() if i.filename}
+            return
+
+        if kind == "tar":
+            tf = tarfile.open(fileobj=io.BytesIO(data))
+            self._keepalive = tf
+            self._entries = [(m.name, m.size, m.isdir())
+                             for m in tf.getmembers() if m.name]
+            self._extract = lambda dest: tf.extractall(dest, filter="data")
+            self._container = "tar"
+            # TarInfo.mode is only the permission bits; carry the type too
+            self._modes = {
+                m.name: (m.mode | (0o120000 if m.issym() else
+                                   0o040000 if m.isdir() else 0o100000))
+                for m in tf.getmembers() if m.name
+            }
+            return
+
+        if kind == "7z":
+            if not os.path.exists(SEVEN_ZIP):
+                raise ValueError("7z.exe is not available.")
+            path = self._stage_temp(".7z")
+            with open(path, "wb") as handle:
+                handle.write(data)
+            result = subprocess.run(
+                [SEVEN_ZIP, "l", "-slt", path],
+                capture_output=True, encoding="utf-8", errors="replace",
+                creationflags=CREATE_NO_WINDOW, timeout=300)
+            if result.returncode != 0:
+                raise ValueError(
+                    "7z could not list this archive:\n"
+                    + (result.stderr or result.stdout or "").strip()[:400])
+            entries, current = [], None
+            for line in (result.stdout or "").splitlines():
+                if line.startswith("Path = "):
+                    if current:
+                        entries.append(current)
+                    current = {"name": line[7:].strip(), "size": 0,
+                               "dir": False, "header": False, "folder": False}
+                elif current is not None and line.startswith("Size = "):
+                    try:
+                        current["size"] = int(line[7:].strip())
+                    except ValueError:
+                        pass
+                elif current is not None and line.startswith("Folder = "):
+                    current["dir"] = line[9:].strip().startswith("+")
+                    current["folder"] = True
+                elif current is not None and line.startswith("Type = "):
+                    # present on the archive's own block, never on an entry
+                    current["header"] = True
+            if current:
+                entries.append(current)
+            # 7z prints the archive itself as the first block; drop it
+            self_name = os.path.basename(path).lower()
+            entries = [
+                e for e in entries
+                if not (e["header"] and not e["folder"])
+                and e["name"].strip("/").lower() != self_name
+            ]
+            if not entries:
+                raise ValueError("7z listed no entries for this archive.")
+            self._entries = [(e["name"], e["size"], e["dir"]) for e in entries]
+            def _run(dest, p=path):
+                proc = subprocess.run(
+                    [SEVEN_ZIP, "x", f"-o{dest}", "-y", p],
+                    capture_output=True, encoding="utf-8", errors="replace",
+                    creationflags=CREATE_NO_WINDOW, timeout=600)
+                if proc.returncode != 0:
+                    raise RuntimeError(
+                        (proc.stderr or proc.stdout or "7z extraction failed").strip()[:400])
+            self._extract = _run
+            self._container = "7z"
+            return
+
+    def _fill(self):
+        if self._error:
+            self._header.setText(self._error)
+            self._extract_btn.setEnabled(False)
+            self._edit_btn.setEnabled(False)
+            return
+        via = "  \u00b7  via 7-Zip" if self._used_7z else ""
+        chain = "".join(f" \u2192 {x}" for x in self._layers)
+        self._header.setText(
+            f"{self._arcname}{chain}  \u00b7  {len(self._entries)} entries{via}")
+        for name, size, is_dir in self._entries:
+            item = QTreeWidgetItem([
+                name,
+                "" if is_dir else ImgManagerWindow._fmt_size(size),
+                "Folder" if is_dir else "File",
+            ])
+            self._tree.addTopLevelItem(item)
+        can_edit = self.editable()
+        self._extract_btn.setEnabled(bool(self._entries))
+        self._edit_btn.setEnabled(can_edit)
+        if can_edit:
+            self._hint.setText(
+                "Edits go to the staged image \u00b7 press Apply to write it")
+        else:
+            self._hint.setText(
+                "Read-only preview \u00b7 extraction writes outside the image")
+
+    def _rebuild_from_dir(self, src_dir):
+        """container bytes for an edited tree, then re-wrap in every layer
+        that was peeled off when the archive was opened."""
+        if self._container == "cpio":
+            blob = build_cpio_from_dir(src_dir, self._modes)
+        elif self._container == "zip":
+            blob = build_zip_from_dir(src_dir, self._modes)
+        elif self._container == "tar":
+            blob = build_tar_from_dir(src_dir, self._modes)
+        else:
+            raise ValueError(
+                f"\"{self._arcname}\" is a {self._container or 'unknown'} "
+                "archive; only cpio, zip and tar can be rebuilt here.")
+        for layer in reversed(self._layers):
+            if layer == "gzip":
+                blob = gzip.compress(blob, 9)
+            elif layer == "xz":
+                blob = lzma.compress(blob)
+            elif layer == "bz2":
+                blob = bz2.compress(blob)
+            else:
+                raise ValueError(f'cannot re-apply the "{layer}" layer.')
+        return blob
+
+    def _on_edit(self):
+        if not self.editable() or not self._extract:
+            return
+        work = tempfile.mkdtemp(prefix="arcedit_")
+        try:
+            self._extract(work)
+        except Exception as exc:
+            shutil.rmtree(work, ignore_errors=True)
+            QMessageBox.warning(self, "IMG Manager",
+                                f"Extract failed:\n{exc}")
+            return
+        dlg = NestedImgDialog(
+            self._arcname, None, work, self,
+            extracted_dir=work, packer=self._rebuild_from_dir,
+            tool_hint="rebuilt by IMG Manager")
+        dlg.exec()
+        packed = dlg.packed_bytes()
+        shutil.rmtree(work, ignore_errors=True)
+        if not packed:
+            return
+        self._packed = packed
+        self.accept()
+
+    def _on_extract(self):
+        if not self._extract:
+            return
+        dest = QFileDialog.getExistingDirectory(self, "Extract to folder")
+        if not dest:
+            return
+        try:
+            self._extract(dest)
+        except Exception as exc:
+            QMessageBox.warning(self, "IMG Manager", f"Extract failed:\n{exc}")
+            return
+        QMessageBox.information(self, "IMG Manager", f"Extracted to:\n{dest}")
+
+    def closeEvent(self, event):
+        super().closeEvent(event)
+        for path in self._temp_files:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        self._temp_files = []
+
+
+class NestedImgDialog(QDialog):
+    """Extract -> modify -> pack for an internal system image (.img).
+
+    Unpacks with assets/img-checker.exe and repacks with assets/img-creater.exe,
+    the exact pair InitrdManager.extract_lsp_image()/repack_lsp_image() already
+    use. Everything happens in a temp folder; the caller commits the packed
+    bytes into the STAGED initrd, so the live image changes only on Apply.
+    """
+
+    _STYLE = """
+        QDialog { background: #171a21; color: #e6e9ef; }
+        QLabel { background: transparent; color: #8a93a6; font-size: 11px; }
+        QTreeWidget {
+            background: #12151c; alternate-background-color: #171b24;
+            color: #e6e9ef; border: 1px solid #2b3242;
+            border-radius: 6px; outline: 0; font-size: 12px;
+        }
+        QTreeWidget::item { padding: 2px 4px; }
+        QTreeWidget::item:hover { background: #1e2432; }
+        QTreeWidget::item:selected { background: #2f5f9e; color: #ffffff; }
+        QHeaderView::section {
+            background: #1c2130; color: #aab2c5;
+            border: none; border-right: 1px solid #2b3242;
+            border-bottom: 1px solid #2b3242;
+            padding: 4px 6px; font-size: 11px;
+        }
+        QPushButton {
+            background: #232838; color: #e6e9ef;
+            border: 1px solid #3a4150; border-radius: 5px;
+            padding: 5px 14px; font-size: 12px;
+        }
+        QPushButton:hover { background: #2c3346; border-color: #5a6478; }
+        QPushButton:pressed { background: #1b2030; }
+        QPushButton:disabled { background: #1a1e27; color: #5b6272; border-color: #262b36; }
+    """
+
+    def __init__(self, arcname, data, work_root, parent=None,
+                 extracted_dir=None, packer=None, tool_hint=""):
+        """`extracted_dir` + `packer` reuse an already-unpacked tree instead
+        of running img-checker.exe (used by the archive viewer's Edit…)."""
+        super().__init__(parent)
+        self.setWindowTitle(f"System image \u2014 {arcname}")
+        self.setStyleSheet(self._STYLE)
+        self.resize(880, 600)
+        self.setMinimumSize(560, 400)
+
+        self._arcname = arcname
+        self._error = None
+        self._packed = None
+        self._work = None
+        self._src = None
+        self._img = None
+        self._ops = []
+        self._packer = packer
+        self._tool_hint = tool_hint or "unpacked by img-checker.exe"
+
+        try:
+            if extracted_dir:
+                if not os.path.isdir(extracted_dir):
+                    raise ValueError(f"not a folder: {extracted_dir}")
+                if packer is None:
+                    raise ValueError("no packer was supplied for this folder.")
+                # the caller owns this folder and cleans it up
+                self._src = extracted_dir
+            else:
+                self._prepare(work_root, data)
+                self._packer = self._pack_with_img_creater
+        except Exception as exc:
+            self._error = str(exc)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(8)
+
+        self._header = QLabel("")
+        outer.addWidget(self._header)
+
+        self._tree = QTreeWidget()
+        self._tree.setColumnCount(3)
+        self._tree.setHeaderLabels(["Name", "Size", "Type"])
+        self._tree.setAlternatingRowColors(True)
+        self._tree.setUniformRowHeights(True)
+        self._tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._tree.setExpandsOnDoubleClick(True)
+        hdr = self._tree.header()
+        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
+        for col in (1, 2):
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        outer.addWidget(self._tree, 1)
+
+        outer.addWidget(QLabel(
+            "Editing changes the extracted copy only \u2014 the image is rebuilt "
+            "when you press Pack, then written to the staged initrd."))
+
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
+        for label, slot in (
+                ("Open", self._on_open),
+                ("Add File\u2026", self._on_add_file),
+                ("Add Folder\u2026", self._on_add_folder),
+                ("New Folder", self._on_new_folder),
+                ("Delete", self._on_delete),
+                ("Refresh", self._on_refresh)):
+            btn = QPushButton(label)
+            btn.setFixedHeight(28)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFocusPolicy(Qt.NoFocus)
+            btn.setStyleSheet(self._STYLE)
+            btn.clicked.connect(slot)
+            row1.addWidget(btn)
+            self._ops.append(btn)
+        outer.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        row2.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.setFixedHeight(28)
+        cancel.setCursor(Qt.PointingHandCursor)
+        cancel.setFocusPolicy(Qt.NoFocus)
+        cancel.setStyleSheet(self._STYLE)
+        cancel.clicked.connect(self.reject)
+        row2.addWidget(cancel)
+
+        self._btn_pack = QPushButton("Pack && Save")
+        self._btn_pack.setFixedHeight(28)
+        self._btn_pack.setCursor(Qt.PointingHandCursor)
+        self._btn_pack.setFocusPolicy(Qt.NoFocus)
+        self._btn_pack.setStyleSheet("""
+            QPushButton {
+                background: #1558b0; color: #ffffff;
+                border: 1px solid #2f7ad6; border-radius: 5px;
+                padding: 5px 18px; font-weight: bold;
+            }
+            QPushButton:hover { background: #1a67ca; }
+            QPushButton:pressed { background: #104a92; }
+            QPushButton:disabled { background: #1a1e27; color: #5b6272; border-color: #262b36; }
+        """)
+        self._btn_pack.clicked.connect(self._on_pack)
+        row2.addWidget(self._btn_pack)
+        outer.addLayout(row2)
+
+        if self._error:
+            self._header.setText(self._error)
+            for btn in self._ops:
+                btn.setEnabled(False)
+            self._btn_pack.setEnabled(False)
+        else:
+            self._rebuild()
+
+    def error(self):
+        return self._error
+
+    def packed_bytes(self):
+        return self._packed
+
+    # ----------------------------------------------------------- extraction
+
+    def _prepare(self, work_root, data):
+        if not os.path.exists(IMG_EXTRACTOR):
+            raise ValueError(
+                "img-checker.exe is missing from assets/ \u2014 this image "
+                "cannot be unpacked.")
+        os.makedirs(work_root, exist_ok=True)
+        self._work = tempfile.mkdtemp(prefix="sysimg_", dir=work_root)
+        base = os.path.basename(self._arcname) or "image.img"
+        if not base.lower().endswith(".img"):
+            base += ".img"
+        self._img = os.path.join(self._work, base)
+        with open(self._img, "wb") as handle:
+            handle.write(data)
+        self._src = os.path.join(self._work, "src")
+        os.makedirs(self._src, exist_ok=True)
+        result = subprocess.run(
+            [IMG_EXTRACTOR, f"--extract={self._src}", "--force", self._img],
+            capture_output=True, encoding="utf-8", errors="replace",
+            timeout=300, creationflags=CREATE_NO_WINDOW)
+        if result.returncode != 0:
+            raise ValueError(
+                "img-checker.exe could not unpack this image:\n"
+                + ((result.stderr or "") + (result.stdout or "")).strip()[:500])
+
+    # ----------------------------------------------------------------- tree
+
+    def _rebuild(self):
+        self._tree.setUpdatesEnabled(False)
+        self._tree.setSortingEnabled(False)
+        self._tree.clear()
+        count = self._add_dir("", self._tree.invisibleRootItem())
+        self._tree.setSortingEnabled(True)
+        for i in range(self._tree.topLevelItemCount()):
+            self._tree.topLevelItem(i).setExpanded(True)
+        self._tree.setUpdatesEnabled(True)
+        self._header.setText(
+            f"{self._arcname}  \u00b7  {count} entries  \u00b7  "
+            f"{self._tool_hint}")
+
+    def _add_dir(self, rel, parent_item):
+        full = os.path.join(self._src, rel) if rel else self._src
+        try:
+            names = sorted(os.listdir(full), key=str.lower)
+        except OSError:
+            return 0
+        rows = []
+        for name in names:
+            path = os.path.join(full, name)
+            child_rel = f"{rel}/{name}" if rel else name
+            rows.append((not os.path.isdir(path), name, child_rel, path))
+        rows.sort(key=lambda row: (row[0], row[1].lower()))
+        count = 0
+        for is_file, name, child_rel, path in rows:
+            if is_file:
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    size = 0
+            else:
+                size = 0
+            item = QTreeWidgetItem([
+                name,
+                "" if not is_file else ImgManagerWindow._fmt_size(size),
+                "File" if is_file else "Folder",
+            ])
+            item.setData(0, Qt.UserRole, {
+                "path": path, "rel": child_rel, "dir": not is_file})
+            parent_item.addChild(item)
+            count += 1
+            if not is_file:
+                count += self._add_dir(child_rel, item)
+        return count
+
+    def _selected_paths(self):
+        out = []
+        for item in self._tree.selectedItems():
+            data = item.data(0, Qt.UserRole)
+            if data:
+                out.append(data)
+        return out
+
+    def _dest_dir(self):
+        picked = self._selected_paths()
+        if not picked:
+            return self._src
+        first = picked[0]
+        return first["path"] if first["dir"] else os.path.dirname(first["path"])
+
+    # -------------------------------------------------------------- actions
+
+    @staticmethod
+    def _valid_name(name):
+        if not name or name in (".", ".."):
+            return False
+        return not any(ch in name for ch in ("/", "\\", "\x00"))
+
+    def _err(self, text):
+        QMessageBox.warning(self, "IMG Manager", text)
+
+    def _info(self, text):
+        QMessageBox.information(self, "IMG Manager", text)
+
+    def _confirm(self, text):
+        return QMessageBox.question(
+            self, "IMG Manager", text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
+
+    def _on_open(self):
+        picked = self._selected_paths()
+        if len(picked) != 1:
+            self._info("Select exactly one file to open.")
+            return
+        entry = picked[0]
+        if entry["dir"]:
+            self._info("Folders cannot be opened \u2014 select a file.")
+            return
+        try:
+            with open(entry["path"], "rb") as handle:
+                data = handle.read()
+        except OSError as exc:
+            self._err(f"Cannot read {entry['rel']}:\n{exc}")
+            return
+        if _looks_like_text(data):
+            dlg = ScriptEditorDialog(entry["rel"], data, self)
+            if dlg.exec() != QDialog.Accepted:
+                return
+            payload = dlg.result_bytes()
+            if payload == data:
+                return
+            try:
+                with open(entry["path"], "wb") as handle:
+                    handle.write(payload)
+            except OSError as exc:
+                self._err(f"Save failed:\n{exc}")
+                return
+            self._rebuild()
+            self._info(f"Saved:\n{entry['rel']}")
+            return
+        kind = ArchiveViewerDialog.sniff(data, entry["rel"])
+        if kind is not None:
+            viewer = ArchiveViewerDialog(entry["rel"], data, self)
+            if viewer.error():
+                self._err(viewer.error())
+                return
+            viewer.exec()
+            return
+        dest, _filter = QFileDialog.getSaveFileName(
+            self, f"Save a copy of {entry['rel']}",
+            entry["rel"].rpartition("/")[2])
+        if not dest:
+            return
+        try:
+            with open(dest, "wb") as handle:
+                handle.write(data)
+        except OSError as exc:
+            self._err(f"Save failed:\n{exc}")
+            return
+        self._info(f"Saved a copy to:\n{dest}")
+
+    def _on_add_file(self):
+        src, _filter = QFileDialog.getOpenFileName(self, "Add file to image")
+        if not src:
+            return
+        dest_dir = self._dest_dir()
+        dest = os.path.join(dest_dir, os.path.basename(src))
+        if os.path.exists(dest) and not self._confirm(
+                f"{os.path.basename(src)} already exists here.\nReplace it?"):
+            return
+        try:
+            shutil.copy2(src, dest)
+        except OSError as exc:
+            self._err(f"Add file failed:\n{exc}")
+            return
+        self._rebuild()
+
+    def _on_add_folder(self):
+        src = QFileDialog.getExistingDirectory(self, "Add folder to image")
+        if not src:
+            return
+        base = os.path.basename(os.path.normpath(src))
+        if not base:
+            self._err("Cannot determine the folder name.")
+            return
+        dest = os.path.join(self._dest_dir(), base)
+        if os.path.exists(dest):
+            if not self._confirm(f"/{base} already exists here.\nReplace it?"):
+                return
+            try:
+                shutil.rmtree(dest)
+            except OSError as exc:
+                self._err(f"Replace failed:\n{exc}")
+                return
+        try:
+            shutil.copytree(src, dest)
+        except OSError as exc:
+            self._err(f"Add folder failed:\n{exc}")
+            return
+        self._rebuild()
+
+    def _on_new_folder(self):
+        text, ok = QInputDialog.getText(self, "IMG Manager", "New folder name:")
+        if not ok:
+            return
+        name = text.strip().strip("/")
+        if not self._valid_name(name):
+            if name:
+                self._err("Invalid name: no slashes, backslashes or dots.")
+            return
+        dest = os.path.join(self._dest_dir(), name)
+        if os.path.exists(dest):
+            self._err(f"/{name} already exists here.")
+            return
+        try:
+            os.makedirs(dest)
+        except OSError as exc:
+            self._err(f"Create failed:\n{exc}")
+            return
+        self._rebuild()
+
+    def _on_delete(self):
+        picked = self._selected_paths()
+        if not picked:
+            self._info("Select one or more entries to delete.")
+            return
+        word = "entry" if len(picked) == 1 else "entries"
+        if not self._confirm(f"Delete {len(picked)} selected {word} from "
+                             "the extracted copy?"):
+            return
+        for entry in picked:
+            try:
+                if entry["dir"]:
+                    shutil.rmtree(entry["path"])
+                else:
+                    os.remove(entry["path"])
+            except OSError as exc:
+                self._err(f"Delete failed:\n{exc}")
+                break
+        self._rebuild()
+
+    def _on_refresh(self):
+        self._rebuild()
+
+    def _on_pack(self):
+        """Rebuild the archive/image and hand the bytes to the caller."""
+        if self._packer is None:
+            self._err("There is nothing to pack.")
+            return
+        try:
+            packed = self._packer(self._src)
+        except Exception as exc:
+            self._err(f"Pack failed:\n{exc}")
+            return
+        if not packed:
+            self._err("Packing produced no data.")
+            return
+        self._packed = packed
+        self.accept()
+
+    def _pack_with_img_creater(self, src_dir):
+        """Rebuild an .img with the bundled img-creater.exe (returns bytes)."""
+        if not os.path.exists(IMG_CREATER):
+            raise ValueError("img-creater.exe is missing from assets/.")
+        out = os.path.join(self._work, "packed.img")
+        if os.path.exists(out):
+            try:
+                os.remove(out)
+            except OSError:
+                pass
+        try:
+            result = subprocess.run(
+                [IMG_CREATER, "-zlz4hc,9", out, src_dir],
+                capture_output=True, encoding="utf-8", errors="replace",
+                timeout=600, creationflags=CREATE_NO_WINDOW)
+        except Exception as exc:
+            raise ValueError(f"img-creater.exe failed:\n{exc}")
+        if result.returncode != 0 or not os.path.isfile(out):
+            detail = ((result.stderr or "") + (result.stdout or "")).strip()[:500]
+            raise ValueError("img-creater.exe could not pack this image:\n"
+                             + detail)
+        try:
+            with open(out, "rb") as handle:
+                return handle.read()
+        except OSError as exc:
+            raise ValueError(f"Cannot read the packed image:\n{exc}")
+
+    def done(self, result):
+        super().done(result)
+        if self._work:
+            shutil.rmtree(self._work, ignore_errors=True)
+            self._work = None
+
+
+class ImgManagerWindow(QWidget):
+    """7-Zip style manager for the initrd.img cpio archive.
+
+    Custom-painted frameless shell (same idiom as PermissionManagerWindow)
+    with standard Qt widgets inside: a toolbar, a multi-column multi-select
+    tree, a status line and a persistent no-backup warning.
+    """
+
+    W = 1100
+    H = 660
+    HDR_H = 46
+    RADIUS = 14
+    CTL_SIZE = 26
+    MAX_HISTORY = 40
+
+    _ACTIONS = (
+        ("open", "Open"),
+        ("extract", "Extract"),
+        ("delete", "Delete"),
+        ("rename", "Rename"),
+        ("overwrite", "Overwrite"),
+        ("add_file", "Add File"),
+        ("add_folder", "Add Folder"),
+        ("new_folder", "New Folder"),
+        ("refresh", "Refresh"),
+    )
+
+    _BTN_STYLE = """
+        QPushButton {
+            background: #232838; color: #e6e9ef;
+            border: 1px solid #3a4150; border-radius: 5px;
+            padding: 4px 10px;
+        }
+        QPushButton:hover { background: #2c3346; border-color: #5a6478; }
+        QPushButton:pressed { background: #1b2030; }
+        QPushButton:disabled { background: #1a1e27; color: #5b6272; border-color: #262b36; }
+    """
+
+    # the one button that writes the live image
+    _BTN_APPLY = """
+        QPushButton {
+            background: #1558b0; color: #ffffff;
+            border: 1px solid #2f7ad6; border-radius: 5px;
+            padding: 4px 18px; font-weight: bold;
+        }
+        QPushButton:hover { background: #1a67ca; }
+        QPushButton:pressed { background: #104a92; }
+        QPushButton:disabled { background: #1a1e27; color: #5b6272; border-color: #262b36; }
+    """
+
+    # red = no backup on disk yet, green = at least one backup exists
+    _BTN_BACKUP_NONE = """
+        QPushButton {
+            background: #7a1f1f; color: #ffd9d9;
+            border: 1px solid #b3392f; border-radius: 5px;
+            padding: 4px 14px; font-weight: bold;
+        }
+        QPushButton:hover { background: #93271f; border-color: #d0453a; }
+        QPushButton:pressed { background: #5c1616; }
+    """
+
+    _BTN_BACKUP_OK = """
+        QPushButton {
+            background: #1c5c2e; color: #d9ffe3;
+            border: 1px solid #2f9e4a; border-radius: 5px;
+            padding: 4px 14px; font-weight: bold;
+        }
+        QPushButton:hover { background: #247a3c; border-color: #3ec164; }
+        QPushButton:pressed { background: #14461f; }
+    """
+
+    _TREE_STYLE = """
+        QTreeWidget {
+            background: #12151c; alternate-background-color: #171b24;
+            color: #e6e9ef; border: 1px solid #2b3242;
+            border-radius: 8px; outline: 0; font-size: 12px;
+        }
+        QTreeWidget::item { padding: 3px 4px; }
+        QTreeWidget::item:hover { background: #1e2432; }
+        QTreeWidget::item:selected { background: #2f5f9e; color: #ffffff; }
+        QTreeWidget::item:selected:!active { background: #2f5f9e; color: #ffffff; }
+        QHeaderView::section {
+            background: #1c2130; color: #aab2c5;
+            border: none; border-right: 1px solid #2b3242;
+            border-bottom: 1px solid #2b3242;
+            padding: 4px 6px; font-size: 11px;
+        }
+    """
+
+    def __init__(self, initrd_path, source_path=None):
+        super().__init__()
+        # Every edit lands in a temp copy of the image; the live file is only
+        # written by the Apply button, so a mistake can never break the boot.
+        self._real_path = initrd_path
+        self._stage_dir = tempfile.mkdtemp(prefix="imgmgr_")
+        self._path = os.path.join(
+            self._stage_dir, os.path.basename(initrd_path) or "initrd.img")
+        shutil.copy2(source_path or initrd_path, self._path)
+        self._mgr = InitrdManager(self._path)
+        self._hist_dir = os.path.join(self._stage_dir, "history")
+        os.makedirs(self._hist_dir, exist_ok=True)
+        self._hist = []
+        self._hist_seq = 0
+        self._hpos = -1
+        self._real_hash = self._file_hash(initrd_path)
+
+        self._entries = {}
+        self._last_action = ""
+        self._dirty = False
+        self._drag_offset = None
+        self._hover = None
+        self._close_rect = None
+        self._max_rect = None
+        self._min_rect = None
+        self._grip = None
+        self._undo_btn = None
+        self._redo_btn = None
+        self._restore_btn = None
+        self._btn_backup = None
+        self._apply_btn = None
+        self._base_title = f"IMG Manager  \u2014  {os.path.basename(initrd_path)}"
+        self._title_text = self._base_title
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setMouseTracking(True)
+        self.setMinimumSize(860, 480)
+        self.resize(self.W, self.H)
+        self._build_layout()
+        self._push_snapshot()
+        self._reload()
+        self._refresh_buttons()
+
+    def _build_layout(self):
+        self._update_control_rects()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, self.HDR_H + 10, 14, 6)
+        outer.setSpacing(6)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        for key, label in self._ACTIONS:
+            if key == "open":
+                continue  # reachable from the context menu only
+            btn = QPushButton(label)
+            btn.setFixedHeight(28)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFocusPolicy(Qt.NoFocus)
+            btn.setStyleSheet(self._BTN_STYLE)
+            btn.clicked.connect(lambda _checked=False, k=key: self._on_action(k))
+            row.addWidget(btn)
+        row.addStretch(1)
+
+        self._undo_btn = QPushButton("Undo")
+        self._undo_btn.setFixedHeight(28)
+        self._undo_btn.setCursor(Qt.PointingHandCursor)
+        self._undo_btn.setFocusPolicy(Qt.NoFocus)
+        self._undo_btn.setStyleSheet(self._BTN_STYLE)
+        self._undo_btn.clicked.connect(self._undo)
+        row.addWidget(self._undo_btn)
+
+        self._redo_btn = QPushButton("Redo")
+        self._redo_btn.setFixedHeight(28)
+        self._redo_btn.setCursor(Qt.PointingHandCursor)
+        self._redo_btn.setFocusPolicy(Qt.NoFocus)
+        self._redo_btn.setStyleSheet(self._BTN_STYLE)
+        self._redo_btn.clicked.connect(self._redo)
+        row.addWidget(self._redo_btn)
+        outer.addLayout(row)
+
+        self._tree = QTreeWidget()
+        self._tree.setColumnCount(5)
+        self._tree.setHeaderLabels(["Name", "Size", "Type", "Mode", "Path"])
+        self._tree.setRootIsDecorated(True)
+        self._tree.setAlternatingRowColors(True)
+        self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._tree.setUniformRowHeights(True)
+        self._tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._tree.setExpandsOnDoubleClick(True)
+        self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_context_menu)
+        self._tree.itemDoubleClicked.connect(self._on_double_click)
+        self._tree.itemSelectionChanged.connect(self._on_selection_changed)
+        self._tree.setStyleSheet(self._TREE_STYLE)
+        hdr = self._tree.header()
+        hdr.setStretchLastSection(False)
+        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
+        for col in (1, 2, 3):
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.Interactive)
+        self._tree.setColumnWidth(4, 300)
+        outer.addWidget(self._tree, 1)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(6)
+
+        self._restore_btn = QPushButton("Restore\u2026")
+        self._restore_btn.setFixedHeight(28)
+        self._restore_btn.setCursor(Qt.PointingHandCursor)
+        self._restore_btn.setFocusPolicy(Qt.NoFocus)
+        self._restore_btn.setStyleSheet(self._BTN_STYLE)
+        self._restore_btn.clicked.connect(self._act_restore)
+        bottom.addWidget(self._restore_btn)
+
+        # colour reports whether a backup exists on disk
+        self._btn_backup = QPushButton("Backup")
+        self._btn_backup.setFixedHeight(28)
+        self._btn_backup.setCursor(Qt.PointingHandCursor)
+        self._btn_backup.setFocusPolicy(Qt.NoFocus)
+        self._btn_backup.clicked.connect(self._act_backup)
+        bottom.addWidget(self._btn_backup)
+
+        self._apply_btn = QPushButton("Apply")
+        self._apply_btn.setFixedHeight(28)
+        self._apply_btn.setCursor(Qt.PointingHandCursor)
+        self._apply_btn.setFocusPolicy(Qt.NoFocus)
+        self._apply_btn.setStyleSheet(self._BTN_APPLY)
+        self._apply_btn.clicked.connect(self._act_apply)
+        bottom.addWidget(self._apply_btn)
+
+        bottom.addStretch(1)
+
+        self._warn = QLabel(
+            "Staged edits only \u2014 nothing touches the live image until "
+            "you press Apply.")
+        self._warn.setFixedHeight(16)
+        self._warn.setStyleSheet("color: #e0a030; font-size: 11px;")
+        bottom.addWidget(self._warn)
+        outer.addLayout(bottom)
+
+        self._status = QLabel("")
+        self._status.setFixedHeight(16)
+        self._status.setStyleSheet("color: #8a93a6; font-size: 11px;")
+        outer.addWidget(self._status)
+
+        self._grip = QSizeGrip(self)
+
+    # ---------------------------------------------------------------- paint
+
+    @staticmethod
+    def _font(size, weight=QFont.Normal):
+        f = QFont("Segoe UI")
+        f.setPixelSize(size)
+        f.setWeight(weight)
+        f.setStyleStrategy(QFont.PreferAntialias)
+        return f
+
+    def paintEvent(self, _event):
+        radius = 0 if self.isMaximized() else self.RADIUS
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        box = QRectF(1.0, 1.0, self.width() - 2.0, self.height() - 2.0)
+        painter.setPen(QPen(QColor("#3a4150"), 1.5))
+        painter.setBrush(QColor("#171a21"))
+        painter.drawRoundedRect(box, radius, radius)
+
+        painter.save()
+        clip = QPainterPath()
+        clip.addRoundedRect(box, radius, radius)
+        painter.setClipPath(clip)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#1f2430"))
+        painter.drawRect(QRectF(0, 0, self.width(), self.HDR_H))
+        painter.setPen(QPen(QColor("#2b3242"), 1))
+        painter.drawLine(8, self.HDR_H, self.width() - 8, self.HDR_H)
+        painter.restore()
+
+        painter.setPen(QColor("#e6e9ef"))
+        painter.setFont(self._font(15, QFont.DemiBold))
+        painter.drawText(16, 0, self.width() - 140, self.HDR_H,
+                         Qt.AlignVCenter | Qt.AlignLeft, self._title_text)
+
+        for kind in ("min", "max", "close"):
+            self._draw_control(painter, kind)
+
+    def _draw_control(self, painter, kind):
+        rect = {"min": self._min_rect, "max": self._max_rect,
+                "close": self._close_rect}[kind]
+        if not rect:
+            return
+        x, y, size = rect
+        hovered = self._hover == kind
+        if kind == "close":
+            bg = QColor("#c0392b") if hovered else QColor("#2f3747")
+        else:
+            bg = QColor("#3c4557") if hovered else QColor("#2f3747")
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(QRectF(x, y, size, size), 6, 6)
+
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor("#ffffff"), 1.5))
+        if kind == "close":
+            painter.drawLine(x + 8, y + 8, x + size - 8, y + size - 8)
+            painter.drawLine(x + size - 8, y + 8, x + 8, y + size - 8)
+        elif kind == "min":
+            painter.drawLine(x + 8, y + size - 9, x + size - 8, y + size - 9)
+        elif self.isMaximized():
+            painter.drawRect(QRectF(x + 7, y + 7, size - 17, size - 17))
+            painter.drawRect(QRectF(x + 11, y + 11, size - 17, size - 17))
+        else:
+            painter.drawRect(QRectF(x + 7, y + 7, size - 14, size - 14))
+
+    def _update_control_rects(self):
+        size = self.CTL_SIZE
+        gap = 6
+        margin = 12
+        y = (self.HDR_H - size) // 2
+        x_close = self.width() - margin - size
+        x_max = x_close - gap - size
+        x_min = x_max - gap - size
+        self._close_rect = (x_close, y, size)
+        self._max_rect = (x_max, y, size)
+        self._min_rect = (x_min, y, size)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_control_rects()
+        if self._grip is not None:
+            hint = self._grip.sizeHint()
+            self._grip.move(self.width() - hint.width() - 2,
+                            self.height() - hint.height() - 2)
+
+    # ---------------------------------------------------------------- mouse
+
+    @staticmethod
+    def _hit(rect, pos):
+        if not rect:
+            return False
+        x, y, size = rect
+        return x <= pos.x() <= x + size and y <= pos.y() <= y + size
+
+    def _control_at(self, pos):
+        for kind in ("min", "max", "close"):
+            if self._hit(getattr(self, f"_{kind}_rect"), pos):
+                return kind
+        return None
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        pos = event.position()
+        control = self._control_at(pos)
+        if control == "close":
+            self.close()
+            event.accept()
+            return
+        if control == "min":
+            self.showMinimized()
+            event.accept()
+            return
+        if control == "max":
+            if self.isMaximized():
+                self.showNormal()
+            else:
+                self.showMaximized()
+            event.accept()
+            return
+        if pos.y() <= self.HDR_H and not self.isMaximized():
+            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_offset is not None and (event.buttons() & Qt.LeftButton):
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+            return
+        hovering = self._control_at(event.position())
+        if hovering != self._hover:
+            self._hover = hovering
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_offset = None
+
+    # ------------------------------------------------------------ tree build
+
+    @staticmethod
+    def _fmt_size(count):
+        if count >= 1024 * 1024:
+            return f"{count / (1024 * 1024):.1f} MB"
+        if count >= 1024:
+            return f"{count / 1024:.1f} KB"
+        return f"{count} B"
+
+    @staticmethod
+    def _kind_label(mode):
+        kind = mode & 0o170000
+        if kind == 0o040000:
+            return "Folder"
+        if kind == 0o120000:
+            return "Symlink"
+        if kind == 0o100000:
+            return "File"
+        return "Other"
+
+    @staticmethod
+    def _mode_label(mode):
+        return f"{mode & 0o7777:04o}"
+
+    def _reload(self):
+        try:
+            raw = self._mgr.list_tree()
+        except Exception as exc:
+            self._entries = {}
+            self._tree.clear()
+            self._last_action = f"cannot read image: {exc}"
+            self._update_status()
+            return
+
+        entries = []
+        for name, mode, size in raw:
+            bare = name.strip("/")
+            if not bare or bare == "TRAILER!!!":
+                continue
+            entries.append((bare, mode, size))
+        self._entries = {bare: (mode, size) for bare, mode, size in entries}
+
+        children = {}
+        for bare in self._entries:
+            children.setdefault(bare.rpartition("/")[0], []).append(bare)
+
+        # a folder can be implied only by its children; synthesise a node
+        virtual = set()
+        for bare in list(self._entries):
+            parts = bare.split("/")
+            for i in range(1, len(parts)):
+                parent = "/".join(parts[:i])
+                if parent not in self._entries:
+                    self._entries[parent] = (0o040755, 0)
+                    virtual.add(parent)
+                    children.setdefault(parent.rpartition("/")[0], []).append(parent)
+
+        self._tree.setUpdatesEnabled(False)
+        self._tree.setSortingEnabled(False)
+        self._tree.clear()
+        self._add_children("", self._tree.invisibleRootItem(), children, virtual)
+        self._tree.setSortingEnabled(True)
+        for i in range(self._tree.topLevelItemCount()):
+            self._tree.topLevelItem(i).setExpanded(True)
+        self._tree.setUpdatesEnabled(True)
+        self._update_status()
+
+    def _add_children(self, parent_path, parent_item, children, virtual):
+        def sort_key(name):
+            mode = self._entries[name][0]
+            return (0 if (mode & 0o170000) == 0o040000 else 1,
+                    name.rpartition("/")[2].lower())
+
+        for child in sorted(children.get(parent_path, []), key=sort_key):
+            mode, size = self._entries[child]
+            is_dir = (mode & 0o170000) == 0o040000
+            item = QTreeWidgetItem([
+                child.rpartition("/")[2],
+                "" if is_dir else self._fmt_size(size),
+                self._kind_label(mode),
+                "\u2014" if child in virtual else self._mode_label(mode),
+                "/" + child,
+            ])
+            item.setData(0, Qt.UserRole, {"name": child, "mode": mode, "dir": is_dir})
+            parent_item.addChild(item)
+            if is_dir:
+                self._add_children(child, item, children, virtual)
+
+    def _update_status(self):
+        selected = len(self._tree.selectedItems())
+        text = f"{len(self._entries)} entries \u00b7 {selected} selected"
+        text += "  \u00b7  staged (not applied)" if self._dirty \
+            else "  \u00b7  in sync"
+        if self._last_action:
+            text += f"  \u00b7  {self._last_action}"
+        self._status.setText(text)
+        self._title_text = ("*" if self._dirty else "") + self._base_title
+        self.update()
+
+    def _on_selection_changed(self):
+        self._update_status()
+
+    # ------------------------------------------------------------- helpers
+
+    def _selected(self):
+        out, seen = [], set()
+        for item in self._tree.selectedItems():
+            data = item.data(0, Qt.UserRole)
+            if data and data["name"] not in seen:
+                seen.add(data["name"])
+                out.append(data["name"])
+        return out
+
+    def _single_selection(self):
+        names = self._selected()
+        if len(names) != 1:
+            return None
+        name = names[0]
+        mode, _size = self._entries.get(name, (0, 0))
+        return name, mode, (mode & 0o170000) == 0o040000
+
+    def _dest_for_add(self):
+        """Folder the next Add/New Folder operation lands in."""
+        info = self._single_selection()
+        if info is None:
+            return ""
+        name, _mode, is_dir = info
+        return name if is_dir else name.rpartition("/")[0]
+
+    def _backup_files(self):
+        """Backups of the LIVE image, named <file>.img.bak-YYYYMMDD-HHMMSS."""
+        folder = os.path.dirname(self._real_path) or "."
+        prefix = os.path.basename(self._real_path) + ".bak-"
+        try:
+            return sorted(name for name in os.listdir(folder)
+                          if name.startswith(prefix))
+        except OSError:
+            return []
+
+    def _refresh_backup_button(self):
+        """Red = no backup on disk, green = at least one exists."""
+        if self._btn_backup is None:
+            return
+        found = self._backup_files()
+        if found:
+            self._btn_backup.setStyleSheet(self._BTN_BACKUP_OK)
+            self._btn_backup.setToolTip(
+                f"{len(found)} backup(s) exist \u2014 click to make another")
+            self._restore_btn.setEnabled(True)
+            self._restore_btn.setToolTip(
+                f"{len(found)} backup(s) \u2014 replace the staged image")
+        else:
+            self._btn_backup.setStyleSheet(self._BTN_BACKUP_NONE)
+            self._btn_backup.setToolTip(
+                "No backup yet \u2014 click to back up the image now")
+            self._restore_btn.setEnabled(False)
+            self._restore_btn.setToolTip("No backup to restore from")
+
+    # ------------------------------------------------- staging + history
+
+    @staticmethod
+    def _file_hash(path):
+        try:
+            digest = hashlib.sha256()
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(chunk)
+            return digest.hexdigest()
+        except OSError:
+            return None
+
+    def _push_snapshot(self):
+        """Record the current staged image so Undo can come back to it."""
+        if self._hpos < len(self._hist) - 1:
+            for stale in self._hist[self._hpos + 1:]:
+                try:
+                    os.remove(stale)
+                except OSError:
+                    pass
+            self._hist = self._hist[:self._hpos + 1]
+        while len(self._hist) >= self.MAX_HISTORY:
+            try:
+                os.remove(self._hist.pop(0))
+            except (OSError, IndexError):
+                pass
+            self._hpos -= 1
+        self._hist_seq += 1
+        path = os.path.join(self._hist_dir, f"{self._hist_seq:05d}.img")
+        try:
+            shutil.copy2(self._path, path)
+        except OSError:
+            return
+        self._hist.append(path)
+        self._hpos = len(self._hist) - 1
+        self._after_history_change()
+
+    def _after_history_change(self):
+        self._update_dirty()
+        self._refresh_buttons()
+        self._update_status()
+
+    def _update_dirty(self):
+        self._dirty = self._file_hash(self._path) != self._real_hash
+
+    def _load_snapshot(self, path):
+        shutil.copy2(path, self._path)
+        self._mgr = InitrdManager(self._path)
+        self._reload()
+        self._after_history_change()
+
+    def _undo(self):
+        if self._hpos <= 0:
+            return
+        self._hpos -= 1
+        self._load_snapshot(self._hist[self._hpos])
+        self._last_action = f"undo ({self._hpos + 1}/{len(self._hist)})"
+        self._update_status()
+
+    def _redo(self):
+        if self._hpos >= len(self._hist) - 1:
+            return
+        self._hpos += 1
+        self._load_snapshot(self._hist[self._hpos])
+        self._last_action = f"redo ({self._hpos + 1}/{len(self._hist)})"
+        self._update_status()
+
+    def _reset_history(self):
+        for path in self._hist:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        self._hist = []
+        self._hpos = -1
+        self._push_snapshot()
+
+    def _commit_op(self, description, callback):
+        """Run a mutating operation on the staged image, then remember it."""
+        try:
+            callback()
+        except Exception as exc:
+            self._err(f"{description} failed:\n{exc}")
+            self._reload()
+            return False
+        self._push_snapshot()
+        self._last_action = description
+        self._reload()
+        self._refresh_buttons()
+        return True
+
+    def _refresh_buttons(self):
+        if self._undo_btn is not None:
+            self._undo_btn.setEnabled(self._hpos > 0)
+            self._undo_btn.setToolTip("Ctrl+Z")
+        if self._redo_btn is not None:
+            self._redo_btn.setEnabled(self._hpos < len(self._hist) - 1)
+            self._redo_btn.setToolTip("Ctrl+Y")
+        if self._apply_btn is not None:
+            self._apply_btn.setEnabled(bool(self._dirty))
+            self._apply_btn.setToolTip(
+                "Write the staged image over the live one" if self._dirty
+                else "Nothing to apply \u2014 staged image matches the live one")
+        if self._btn_backup is not None:
+            self._refresh_backup_button()
+
+    @staticmethod
+    def _valid_name(name):
+        if not name or name in (".", ".."):
+            return False
+        return not any(ch in name for ch in ("/", "\\", "\x00"))
+
+    def _info(self, text):
+        QMessageBox.information(self, "IMG Manager", text)
+
+    def _err(self, text):
+        QMessageBox.warning(self, "IMG Manager", text)
+
+    def _confirm(self, text):
+        return QMessageBox.question(
+            self, "IMG Manager", text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
+
+    # ------------------------------------------------------------ actions
+
+    def _on_action(self, key):
+        for action_key, _label in self._ACTIONS:
+            if action_key == key:
+                getattr(self, f"_act_{key}")()
+                return
+
+    def _on_context_menu(self, pos):
+        item = self._tree.itemAt(pos)
+        if item is not None and not item.isSelected():
+            self._tree.clearSelection()
+            self._tree.setCurrentItem(item)
+            item.setSelected(True)
+        menu = QMenu(self)
+        for key, label in self._ACTIONS:
+            action = menu.addAction(label)
+            action.triggered.connect(lambda _checked=False, k=key: self._on_action(k))
+            if key == "open":
+                menu.addSeparator()
+        menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _on_double_click(self, item, _column):
+        data = item.data(0, Qt.UserRole)
+        if data and data.get("dir"):
+            return  # folders just expand
+        self._act_open()
+
+    def _act_refresh(self):
+        self._last_action = "refreshed"
+        self._reload()
+
+    def _act_backup(self):
+        """Snapshot the LIVE image (not the staged copy) next to it."""
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        dest = f"{self._real_path}.bak-{stamp}"
+        copy = 1
+        while os.path.exists(dest):
+            copy += 1
+            dest = f"{self._real_path}.bak-{stamp}-{copy}"
+        try:
+            shutil.copy2(self._real_path, dest)
+        except Exception as exc:
+            self._err(f"Backup failed:\n{exc}")
+            return
+        self._refresh_buttons()
+        self._last_action = f"backup -> {os.path.basename(dest)}"
+        self._update_status()
+        self._info(f"Backup written at {time.strftime('%H:%M:%S')}:\n{dest}")
+
+    def _act_apply(self):
+        """Atomically replace the live image with the staged one."""
+        if not self._dirty:
+            self._info("Nothing to apply \u2014 staged image matches the live one.")
+            return
+        if not self._confirm(
+                "Write the staged image over the live one?\n"
+                f"{os.path.basename(self._real_path)} will be replaced."):
+            return
+        if not self._backup_files():
+            if self._confirm(
+                    "There is NO backup of this image.\nCreate one before applying?"):
+                self._act_backup()
+                if not self._backup_files():
+                    return
+        temp = self._real_path + ".applied.tmp"
+        try:
+            shutil.copy2(self._path, temp)
+            os.replace(temp, self._real_path)
+        except Exception as exc:
+            try:
+                os.remove(temp)
+            except OSError:
+                pass
+            self._err(f"Apply failed:\n{exc}")
+            return
+        self._real_hash = self._file_hash(self._real_path)
+        self._update_dirty()
+        self._refresh_buttons()
+        self._last_action = "applied to live image"
+        self._update_status()
+        self._info(f"Applied:\n{self._real_path}")
+
+    def _act_restore(self):
+        """Replace the staged image with a saved backup (live image untouched)."""
+        found = self._backup_files()
+        if not found:
+            self._info("No backups exist yet \u2014 press Backup first.")
+            return
+        folder = os.path.dirname(self._real_path) or "."
+        name, ok = QInputDialog.getItem(
+            self, "Restore backup", "Backup:", found, 0, False)
+        if not ok or not name:
+            return
+        src = os.path.join(folder, name)
+        if not self._confirm(
+                f"Replace the staged image with\n{name}?\n"
+                "The live image is not touched until you press Apply."):
+            return
+        try:
+            shutil.copy2(src, self._path)
+        except Exception as exc:
+            self._err(f"Restore failed:\n{exc}")
+            return
+        self._mgr = InitrdManager(self._path)
+        self._reset_history()
+        self._last_action = f"restored {name} into staging"
+        self._reload()
+        self._refresh_buttons()
+        self._info(f"Staged image replaced with:\n{src}")
+
+    def _act_open(self):
+        """Open one entry INSIDE the app: system image, archive or editor.
+
+        Never opens a file dialog on its own initiative \u2014 an unknown
+        binary asks first instead of dropping the user in a folder picker.
+        """
+        info = self._single_selection()
+        if info is None:
+            self._info("Select exactly one file entry to open.")
+            return
+        name, _mode, is_dir = info
+        if is_dir:
+            self._info("Folders cannot be opened \u2014 select a file.")
+            return
+        try:
+            data = CpioUtils.read_file(self._path, name)
+        except Exception as exc:
+            self._err(f"Cannot read /{name}:\n{exc}")
+            return
+        if data is None:
+            self._err(f"/{name} is no longer present in the image.")
+            return
+
+        if data[:4] == b"\x3a\xff\x26\xed":
+            self._err(
+                f"/{name} is an Android sparse image.\n"
+                "Convert it with simg2img before opening.")
+            return
+
+        if name.lower().endswith(".img"):
+            self._open_system_image(name, data)
+            return
+
+        if ArchiveViewerDialog.sniff(data, name) is not None:
+            self._show_viewer(name, data)
+            return
+
+        if _looks_like_text(data):
+            self._edit_text(name, data)
+            return
+
+        # unknown binary: the built-in decoders missed, let 7-Zip have a go
+        self._show_viewer(name, data)
+
+    def _commit_bytes(self, name, packed, verb="repacked"):
+        """Write rebuilt archive bytes into the STAGED image, never the live one."""
+        mode, _size = self._entries.get(name, (0, 0))
+        perms = ((mode or 0o100644) | guess_mode(name, packed)) & 0o7777
+        if self._commit_op(
+                f"{verb} /{name} ({len(packed):,} bytes)",
+                lambda: self._mgr.overwrite(name, packed,
+                                            mode=0o100000 | perms)):
+            self._info(f"Packed into the staged image:\n/{name}\n"
+                       "Press Apply to write the live image.")
+            return True
+        return False
+
+    def _show_viewer(self, name, data):
+        """Open the archive viewer; on failure ask, never auto-open a picker."""
+        viewer = ArchiveViewerDialog(name, data, self)
+        if viewer.error():
+            self._open_unknown(name, data, viewer.error())
+            return False
+        viewer.exec()
+        packed = viewer.result_bytes()
+        if packed:
+            self._commit_bytes(name, packed, "rebuilt")
+            return True
+        self._last_action = f"viewed /{name}"
+        self._update_status()
+        return True
+
+    def _open_system_image(self, name, data):
+        """Internal .img -> img-checker extract, edit, img-creater pack."""
+        dlg = NestedImgDialog(
+            name, data, os.path.join(self._stage_dir, "nested"), self)
+        if dlg.error():
+            img_error = dlg.error()
+            dlg.reject()
+            viewer = ArchiveViewerDialog(name, data, self)
+            if viewer.error():
+                self._err(
+                    f"/{name} could not be opened.\n\n"
+                    f"img-checker.exe \u2014 {img_error}\n\n"
+                    f"7-Zip \u2014 {viewer.error()}")
+                return
+            viewer.exec()
+            packed = viewer.result_bytes()
+            if packed:
+                self._commit_bytes(name, packed, "rebuilt")
+                return
+            self._last_action = f"viewed /{name} (read-only)"
+            self._update_status()
+            return
+        dlg.exec()
+        packed = dlg.packed_bytes()
+        if not packed:
+            self._last_action = f"no changes packed into /{name}"
+            self._update_status()
+            return
+        mode, _size = self._entries.get(name, (0, 0))
+        new_mode = 0o100000 | ((mode or 0o100644) & 0o7777)
+        if self._commit_op(
+                f"repacked /{name} ({len(packed):,} bytes)",
+                lambda: self._mgr.overwrite(name, packed, mode=new_mode)):
+            self._info(f"Packed into the staged image:\n/{name}\n"
+                       "Press Apply to write the live image.")
+
+    def _edit_text(self, name, data):
+        mode, _size = self._entries.get(name, (0, 0))
+        dlg = ScriptEditorDialog(name, data, self)
+        if dlg.exec() != QDialog.Accepted:
+            return False
+        payload = dlg.result_bytes()
+        if payload == data:
+            self._last_action = "no changes saved"
+            self._update_status()
+            return False
+        new_mode = 0o100000 | ((mode | guess_mode(name, payload)) & 0o7777)
+        if self._commit_op(
+                f"saved /{name} ({len(payload):,} bytes)",
+                lambda: self._mgr.overwrite(name, payload, mode=new_mode)):
+            self._info(f"Saved to the staged image:\n/{name}\n"
+                       "Press Apply to write the live image.")
+            return True
+        return False
+
+    def _open_unknown(self, name, data, reason=""):
+        """Ask what to do instead of popping a folder picker by itself."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("IMG Manager")
+        box.setText(f"/{name} is not a recognised archive.")
+        info = ("Nothing is extracted on its own. Open it as text, or save "
+                "a copy to disk.")
+        if reason:
+            info = f"{reason}\n\n{info}"
+        box.setInformativeText(info)
+        text_btn = box.addButton("Open as text", QMessageBox.AcceptRole)
+        save_btn = box.addButton("Save a copy\u2026", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(text_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is text_btn:
+            self._edit_text(name, data)
+            return
+        if clicked is save_btn:
+            dest, _filter = QFileDialog.getSaveFileName(
+                self, f"Save a copy of {name}", name.rpartition("/")[2])
+            if not dest:
+                return
+            try:
+                with open(dest, "wb") as handle:
+                    handle.write(data)
+            except OSError as exc:
+                self._err(f"Save failed:\n{exc}")
+                return
+            self._last_action = f"saved a copy of /{name}"
+            self._update_status()
+            self._info(f"Saved a copy to:\n{dest}")
+
+    def _act_extract(self):
+        names = self._selected() or None
+        if names is None:
+            if not self._confirm("No selection \u2014 extract the whole image?"):
+                return
+        dest = QFileDialog.getExistingDirectory(self, "Extract to folder")
+        if not dest:
+            return
+        try:
+            count = self._mgr.extract(dest, names)
+        except Exception as exc:
+            self._err(f"Extract failed:\n{exc}")
+            return
+        self._last_action = f"extracted {count} entries"
+        self._reload()
+        self._info(f"Extracted {count} entries to:\n{dest}")
+
+    def _act_delete(self):
+        names = self._selected()
+        if not names:
+            self._info("Select one or more entries to delete.")
+            return
+        total = sum(1 for key in self._entries
+                    if any(key == n or key.startswith(n + "/") for n in names))
+        word = "entry" if len(names) == 1 else "entries"
+        if not self._confirm(f"Delete {len(names)} selected {word}?\n"
+                             f"This removes {total} entries from the image."):
+            return
+        self._commit_op(
+            f"deleted {total} entries",
+            lambda: self._mgr.delete_entries(names))
+
+    def _act_rename(self):
+        info = self._single_selection()
+        if info is None:
+            self._info("Select exactly one entry to rename.")
+            return
+        old, _mode, _is_dir = info
+        current = old.rpartition("/")[2]
+        text, ok = QInputDialog.getText(self, "IMG Manager", "New name:", text=current)
+        if not ok:
+            return
+        new_base = text.strip()
+        if not self._valid_name(new_base):
+            if new_base:
+                self._err("Invalid name: no slashes, backslashes or dots.")
+            return
+        parent = old.rpartition("/")[0]
+        new = f"{parent}/{new_base}" if parent else new_base
+        if new == old:
+            return
+        self._commit_op(
+            f"renamed {old} -> {new}",
+            lambda: self._mgr.rename(old, new))
+
+    def _act_overwrite(self):
+        info = self._single_selection()
+        if info is None:
+            self._info("Select exactly one file entry to overwrite.")
+            return
+        old, mode, is_dir = info
+        if is_dir:
+            self._err("Cannot overwrite a folder from disk \u2014 use Add Folder instead.")
+            return
+        src, _filter = QFileDialog.getOpenFileName(
+            self, f"Replace /{old} with file\u2026")
+        if not src:
+            return
+        try:
+            with open(src, "rb") as handle:
+                data = handle.read()
+        except OSError as exc:
+            self._err(f"Cannot read {src}:\n{exc}")
+            return
+        new_mode = 0o100000 | ((mode | guess_mode(old, data)) & 0o7777)
+        self._commit_op(
+            f"overwrote /{old} ({len(data):,} bytes)",
+            lambda: self._mgr.overwrite(old, data, mode=new_mode))
+
+    def _act_add_file(self):
+        dest = self._dest_for_add()
+        src, _filter = QFileDialog.getOpenFileName(self, "Add file to image")
+        if not src:
+            return
+        arcname = f"{dest}/{os.path.basename(src)}" if dest else os.path.basename(src)
+        if arcname in self._entries and not self._confirm(f"/{arcname} already exists.\nReplace it?"):
+            return
+        self._commit_op(
+            f"added /{arcname}",
+            lambda: self._mgr.inject_file(src, dest=dest))
+
+    def _act_add_folder(self):
+        dest = self._dest_for_add()
+        src = QFileDialog.getExistingDirectory(self, "Add folder to image")
+        if not src:
+            return
+        base = os.path.basename(os.path.normpath(src))
+        if not base:
+            self._err("Cannot determine the folder name.")
+            return
+        root = f"{dest}/{base}" if dest else base
+        if root in self._entries:
+            if not self._confirm(f"/{root} already exists.\nReplace it?"):
+                return
+        def _add_folder():
+            if root in self._entries:
+                CpioUtils.delete_tree(self._path, root)
+            self._mgr.inject_folder(src, dest=root)
+        self._commit_op(f"added folder /{root}", _add_folder)
+
+    def _act_new_folder(self):
+        dest = self._dest_for_add()
+        text, ok = QInputDialog.getText(self, "IMG Manager", "New folder name:")
+        if not ok:
+            return
+        name = text.strip().strip("/")
+        if not self._valid_name(name):
+            if name:
+                self._err("Invalid name: no slashes, backslashes or dots.")
+            return
+        arcname = f"{dest}/{name}" if dest else name
+        self._commit_op(
+            f"created folder /{arcname}",
+            lambda: self._mgr.new_folder(arcname))
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        mods = event.modifiers()
+        if key in (Qt.Key_Z, Qt.Key_Y) and (mods & Qt.ControlModifier):
+            if key == Qt.Key_Y or (mods & Qt.ShiftModifier):
+                self._redo()
+            else:
+                self._undo()
+            event.accept()
+            return
+        handlers = {
+            Qt.Key_Delete: "delete",
+            Qt.Key_F2: "rename",
+            Qt.Key_F5: "refresh",
+        }
+        action = handlers.get(key)
+        if action is not None and mods == Qt.NoModifier:
+            self._on_action(action)
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        if self._dirty:
+            answer = QMessageBox.question(
+                self, "IMG Manager",
+                "You have staged edits that were never applied.\n"
+                "Discard them and close?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+        event.accept()
+        shutil.rmtree(self._stage_dir, ignore_errors=True)
 
 
 class WSATWRP:
@@ -1900,12 +5134,23 @@ class WSATWRP:
                 log("Patching file directly...")
 
             log("Checking Magisk hook...")
-            if not initrd.add_hook_infrastructure():
-                log("Magisk hook install failed!")
-                time.sleep(2)
-                window.request_close()
-                return
-            log("Magisk hook ready")
+            hook_problems = initrd.hook_issues()
+            if hook_problems:
+                for problem in hook_problems:
+                    log(f"  - {problem}")
+                initrd.add_hook_infrastructure()
+                initrd.repair_hook_infrastructure()
+                hook_problems = initrd.hook_issues()
+                if hook_problems:
+                    log("Magisk hook install failed:")
+                    for problem in hook_problems:
+                        log(f"  - {problem}")
+                    time.sleep(2)
+                    window.request_close()
+                    return
+                log("Magisk hook installed")
+            else:
+                log("Magisk hook already present")
             time.sleep(0.5)
 
             if inject_file:
@@ -2115,7 +5360,7 @@ class WSATWRP:
         initrd = InitrdManager(initrd_path)
         if initrd.is_stock():
             log("Stock WSA (no recovery system installed)")
-            log("Run without --enable-twrp to install first")
+            log(f"Run {CLI_NAME} without --enable-twrp to install first")
             time.sleep(2)
             window.request_close()
             return
@@ -2221,7 +5466,12 @@ class WSATWRP:
         time.sleep(1)
         window.request_close()
 
-    def install_as_system_app(self, apk_paths, target_initrd=None, force_update=False):
+    def install_as_system_app(self, apk_paths, target_initrd=None, force_update=False, mode=None):
+        mode = resolve_mode(mode, "user")
+        if mode == "admin" and not _require_admin_password():
+            return 1
+        select_image(mode)
+
         app = QApplication.instance()
         if app is None:
             app = QApplication(sys.argv)
@@ -2262,17 +5512,11 @@ class WSATWRP:
 
         permission_profiles = {}
         for info in apk_infos:
-            categories = {
-                "privileged": info["privileged"],
-                "dangerous": info["dangerous"],
-                "normal": info["normal"],
-            }
             result_box = [None]
             loop = QEventLoop()
             dlg = PermissionManagerWindow(
                 package_name=info["package"],
                 app_label=info["label"],
-                permissions_by_category=categories,
             )
             dlg._signals.result_ready.connect(lambda r, rb=result_box, l=loop: (rb.__setitem__(0, r), l.quit()))
             screen = app.primaryScreen()
@@ -2289,9 +5533,9 @@ class WSATWRP:
                 profile = {
                     "hide_uninstall": True,
                     "hide_disable": True,
-                    "privapp_perms": list(info["privileged"]),
-                    "runtime_perms": list(info["dangerous"]),
-                    "fixed_runtime_perms": list(info["dangerous"]),
+                    "privapp_perms": sorted(PRIVILEGED_PERMS),
+                    "runtime_perms": list(DANGEROUS_PERMS) + list(SPECIAL_PERMS),
+                    "fixed_runtime_perms": list(DANGEROUS_PERMS) + list(SPECIAL_PERMS),
                 }
             permission_profiles[info["package"]] = profile
 
@@ -2300,12 +5544,16 @@ class WSATWRP:
             target_initrd=target_initrd,
             permission_profiles=permission_profiles,
             force_update=force_update,
+            mode=mode,
         ))
 
     def _flow_install_system_app(self, log, window, apk_paths, target_initrd=None,
-                                  permission_profiles=None, force_update=False):
+                                  permission_profiles=None, force_update=False, mode=None):
         _debug("_flow_install_system_app() started")
         _debug(f"  apk_paths: {apk_paths}")
+        mode = resolve_mode(mode, "user")
+        select_image(mode)
+        _debug(f"  module: {LSP_LABEL} -> {LSP_IMAGE_NAME} (id={LSP_MOD_ID})")
 
         for apk_path in apk_paths:
             if not os.path.exists(apk_path):
@@ -2360,6 +5608,7 @@ class WSATWRP:
             permission_profiles = {}
 
         log("Installing system apps...")
+        log(f"Module: {LSP_MOD_ID} ({LSP_LABEL}) - image {LSP_IMAGE_NAME}")
         for pkg, profile in permission_profiles.items():
             log(f"  {pkg}: privapp={len(profile.get('privapp_perms', []))}, "
                 f"runtime={len(profile.get('runtime_perms', []))}")
@@ -2369,13 +5618,7 @@ class WSATWRP:
         log(f"Root access: {'detected' if has_root else 'not detected'}")
         time.sleep(0.5)
 
-        if is_wsa_img:
-            log("Stopping WSA...")
-            KillWSA.kill_all()
-            time.sleep(3)
-        else:
-            log("Patching file directly...")
-
+        _debug("READ-ONLY PHASE: checking hooks and APKs")
         hook_ok = initrd.add_hook_infrastructure()
         if not hook_ok:
             log("Failed to add hook infrastructure!")
@@ -2384,73 +5627,124 @@ class WSATWRP:
             return
         time.sleep(0.5)
 
+        apks_to_write = []
         for apk_path in apk_paths:
             pkg = ApkAnalyzer.get_package_name(apk_path)
             profile = permission_profiles.get(pkg)
             if not profile:
                 log(f"Skipped {pkg} (no profile)")
                 continue
+            if initrd.has_lsp_image():
+                existing = initrd.find_existing_apks()
+                apk_basename = os.path.basename(apk_path)
+                found = any(os.path.basename(a) == apk_basename for _, a in existing)
+                if found:
+                    if force_update:
+                        log(f"{pkg} already installed, updating")
+                    else:
+                        log(f"{pkg} already installed. Use {CLI_NAME} --update-as-system-app to reinstall.")
+                        continue
+            apks_to_write.append((apk_path, pkg, profile))
+
+        if not apks_to_write:
+            log("Nothing to install, all up to date")
+            time.sleep(2)
+            window.request_close()
+            return
+
+        _debug(f"WRITE PHASE: {len(apks_to_write)} app(s) to install")
+        if is_wsa_img:
+            log("Stopping WSA...")
+            KillWSA.kill_all()
+            time.sleep(3)
+        else:
+            log("Patching file directly...")
+
+        for apk_path, pkg, profile in apks_to_write:
             log(f"Installing {pkg} as system app")
             time.sleep(0.5)
 
-            if force_update and initrd.has_lsp_image():
-                log("Force update: removing old image")
-                arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
-                CpioUtils.delete_file(initrd.path, arcname)
-
             if initrd.has_lsp_image():
-                _debug("lsp image exists, checking for duplicate")
-                existing = initrd.find_existing_apks()
-                apk_basename = os.path.basename(apk_path)
-                found = False
-                for existing_pkg, existing_apk in existing:
-                    if os.path.basename(existing_apk) == apk_basename:
-                        log(f"{pkg} already installed, updating")
-                        found = True
-                        break
-
                 _debug("Extracting existing image")
                 extract_dir = initrd.extract_lsp_image()
                 if extract_dir:
+                    _debug(f"  extract_dir: {extract_dir}")
                     priv_app = os.path.join(extract_dir, "system", "priv-app")
                     os.makedirs(os.path.join(priv_app, pkg), exist_ok=True)
                     shutil.copy2(apk_path, os.path.join(priv_app, pkg, os.path.basename(apk_path)))
-                    _debug(f"Added: system/priv-app/{pkg}/{os.path.basename(apk_path)}")
+                    _debug(f"  Added: system/priv-app/{pkg}/{os.path.basename(apk_path)}")
 
                     perm_dir = os.path.join(extract_dir, "permissions")
                     os.makedirs(perm_dir, exist_ok=True)
                     with open(os.path.join(perm_dir, f"{pkg}.json"), "w", newline="") as f:
                         json.dump(profile, f, indent=2)
+                    _debug(f"  Saved profile: permissions/{pkg}.json")
 
                     svc_path = os.path.join(extract_dir, "service.sh")
                     if not os.path.exists(svc_path):
                         svc_content = (
                             "#!/system/bin/sh\n"
+                            "LOGFILE=\"$(dirname \"$0\")/service.log\"\n"
+                            "log() { echo \"[$(date '+%Y-%m-%d %H:%M:%S')] $1\" | tee -a \"$LOGFILE\"; }\n"
+                            "log \"=== service.sh start ===\"\n"
                             "MODDIR=${0%/*}\n"
                             "PERM_DIR=\"$MODDIR/permissions\"\n"
+                            "log \"MODDIR=$MODDIR\"\n"
+                            "log \"PERM_DIR=$PERM_DIR\"\n"
                             "\n"
                             "while [ \"$(getprop sys.boot_completed)\" != \"1\" ]; do sleep 1; done\n"
                             "sleep 3\n"
+                            "log \"Boot completed, processing profiles...\"\n"
                             "\n"
+                            "COUNT=0\n"
+                            "GRANTED=0\n"
+                            "ENABLED=0\n"
                             "for profile in \"$PERM_DIR\"/*.json; do\n"
                             "    [ -f \"$profile\" ] || continue\n"
                             "    PKG=$(basename \"$profile\" .json)\n"
+                            "    COUNT=$((COUNT + 1))\n"
+                            "    log \"--- Processing: $PKG ---\"\n"
                             "\n"
-                            "    pm list packages 2>/dev/null | grep -q \"package:$PKG\" || continue\n"
+                            "    if ! pm list packages 2>/dev/null | grep -q \"package:$PKG\"; then\n"
+                            "        log \"SKIP: $PKG not installed\"\n"
+                            "        continue\n"
+                            "    fi\n"
+                            "    log \"FOUND: $PKG is installed\"\n"
                             "\n"
+                            "    log \"Granting runtime permissions...\"\n"
                             "    grep -o '\"android\\.[^\"]*\"' \"$profile\" | tr -d '\"' | while read perm; do\n"
-                            "        pm grant \"$PKG\" \"$perm\" 2>/dev/null\n"
+                            "        if pm grant \"$PKG\" \"$perm\" 2>/dev/null; then\n"
+                            "            log \"  GRANTED: $perm\"\n"
+                            "        else\n"
+                            "            log \"  SKIP: $perm (already granted or not applicable)\"\n"
+                            "        fi\n"
+                            "        GRANTED=$((GRANTED + 1))\n"
                             "    done\n"
                             "\n"
                             "    if grep -q '\"hide_disable\": *true' \"$profile\"; then\n"
-                            "        pm enable \"$PKG\" 2>/dev/null\n"
+                            "        if pm enable \"$PKG\" 2>/dev/null; then\n"
+                            "            log \"ENABLED: $PKG\"\n"
+                            "            ENABLED=$((ENABLED + 1))\n"
+                            "        else\n"
+                            "            log \"ENABLE SKIP: $PKG (already enabled)\"\n"
+                            "        fi\n"
                             "    fi\n"
                             "\n"
-                            "    magisk resetprop -n \"persist.sys.priapp.$PKG\" \"1\" 2>/dev/null\n"
+                            "    if magisk resetprop -n \"persist.sys.priapp.$PKG\" \"1\" 2>/dev/null; then\n"
+                            "        log \"RESETPROP: persist.sys.priapp.$PKG=1\"\n"
+                            "    else\n"
+                            "        log \"RESETPROP SKIP: $PKG (magisk not available)\"\n"
+                            "    fi\n"
+                            "\n"
+                            "    log \"--- Done: $PKG ---\"\n"
                             "done\n"
+                            "\n"
+                            "log \"Summary: profiles=$COUNT granted=$GRANTED enabled=$ENABLED\"\n"
+                            "log \"=== service.sh end ===\"\n"
                         )
                         with open(svc_path, "w", newline="") as f:
                             f.write(svc_content)
+                        _debug(f"  Injected service.sh to EROFS")
 
                     privapp_perms = profile.get("privapp_perms", [])
                     runtime_perms = profile.get("runtime_perms", [])
@@ -2459,30 +5753,36 @@ class WSATWRP:
                         etc_perms = os.path.join(extract_dir, "system", "etc", "permissions")
                         os.makedirs(etc_perms, exist_ok=True)
                         xml = InitrdManager.generate_privapp_xml(pkg, privapp_perms)
-                        with open(os.path.join(etc_perms, "privapp-permissions-wsa-installer.xml"), "w", newline="") as f:
+                        with open(os.path.join(etc_perms, LSP_PRIV_XML), "w", newline="") as f:
                             f.write(xml)
+                        _debug(f"  Generated {LSP_PRIV_XML} ({len(privapp_perms)} perms)")
                     if runtime_perms:
                         etc_def = os.path.join(extract_dir, "system", "etc", "default-permissions")
                         os.makedirs(etc_def, exist_ok=True)
                         xml = InitrdManager.generate_default_xml(pkg, runtime_perms, fixed_perms)
-                        with open(os.path.join(etc_def, "default-permissions-wsa-installer.xml"), "w", newline="") as f:
+                        with open(os.path.join(etc_def, LSP_DEF_XML), "w", newline="") as f:
                             f.write(xml)
+                        _debug(f"  Generated {LSP_DEF_XML} ({len(runtime_perms)} perms)")
 
+                    _debug("  Repacking EROFS image")
                     initrd.repack_lsp_image()
                     log(f"Added {pkg}")
                 else:
                     log("Failed to extract image, creating new")
+                    _debug("  Creating new LSP image from scratch")
                     image_data = initrd.create_lsp_image([apk_path], {pkg: profile})
                     arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
                     if CpioUtils.has_file(initrd.path, arcname):
                         CpioUtils.delete_file(initrd.path, arcname)
                     CpioUtils.add_file(initrd.path, arcname, image_data)
+                    _debug(f"  add_file({arcname}, {len(image_data):,} bytes)")
                     log(f"Added {pkg}")
             else:
                 _debug("No lsp image, creating new")
                 image_data = initrd.create_lsp_image([apk_path], {pkg: profile})
                 arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
                 CpioUtils.add_file(initrd.path, arcname, image_data)
+                _debug(f"  add_file({arcname}, {len(image_data):,} bytes)")
                 log(f"Added {pkg}")
             time.sleep(0.5)
 
@@ -2515,6 +5815,8 @@ class WSATWRP:
             info = initrd.read_info()
             if info:
                 print(f"TWRP Support: {info.get('twrp_support', False)}")
+                missing = initrd.twrp_missing()
+                print(f"Missing TWRP files: {', '.join(missing) if missing else 'none'}")
                 print(f"GApps Support: {info.get('gapp_support', False)}")
                 print(f"Root Support: {info.get('root_support', False)}")
                 print(f"Root Method: {info.get('root_method', 'Unknown')}")
@@ -2547,6 +5849,8 @@ class WSATWRP:
         info = initrd.read_info()
         if info:
             print(f"TWRP Support: {info.get('twrp_support', False)}")
+            missing = initrd.twrp_missing()
+            print(f"Missing TWRP files: {', '.join(missing) if missing else 'none'}")
             print(f"GApps Support: {info.get('gapp_support', False)}")
             print(f"Root Support: {info.get('root_support', False)}")
             print(f"Root Method: {info.get('root_method', 'Unknown')}")
@@ -2560,9 +5864,14 @@ class WSATWRP:
         else:
             print("Recovery system: PRESENT (no info.json)")
 
+        for m in ("admin", "user"):
+            select_image(m)
+            self._status_lsp_apps(initrd)
+
+    def _status_lsp_apps(self, initrd):
         if initrd.has_lsp_image():
             print()
-            print(f"System Apps ({LSP_IMAGE_NAME})")
+            print(f"System Apps ({LSP_IMAGE_NAME}) [{LSP_LABEL}]")
             print("-" * 50)
             extract_dir = initrd.extract_lsp_image()
             if extract_dir:
@@ -2612,7 +5921,416 @@ class WSATWRP:
                 print("  Failed to extract image")
         else:
             print()
-            print(f"System Apps ({LSP_IMAGE_NAME}): NOT PRESENT")
+            print(f"System Apps ({LSP_IMAGE_NAME}) [{LSP_LABEL}]: NOT PRESENT")
+
+    def list_boltware(self, initrd_path=None, mode=None):
+        if initrd_path:
+            if not os.path.exists(initrd_path):
+                print(f"File not found: {initrd_path}")
+                return
+            initrd = InitrdManager(initrd_path)
+        else:
+            wsa_path = WSADetector.find_path()
+            if not wsa_path:
+                print("WSA not found!")
+                return
+            initrd_path = WSADetector.initrd_path(wsa_path)
+            if not os.path.exists(initrd_path):
+                print("Recovery system not found!")
+                return
+            initrd = InitrdManager(initrd_path)
+
+        if initrd.is_stock():
+            print("Recovery system: STOCK (no TWRP)")
+            return
+
+        print(f"{APP_NAME} v{APP_VERSION}")
+        print("=" * 50)
+
+        for m in (["admin", "user"] if mode is None else [mode]):
+            select_image(m)
+            self._list_lsp_apps(initrd)
+
+    def _list_lsp_apps(self, initrd):
+        if not initrd.has_lsp_image():
+            print(f"\nSystem Apps ({LSP_IMAGE_NAME}) [{LSP_LABEL}]: NOT PRESENT")
+            return
+
+        extract_dir = initrd.extract_lsp_image()
+        if not extract_dir:
+            print("Failed to extract image")
+            return
+
+        try:
+            perm_dir = os.path.join(extract_dir, "permissions")
+            priv_app = os.path.join(extract_dir, "system", "priv-app")
+
+            profiles = {}
+            if os.path.isdir(perm_dir):
+                for jf in os.listdir(perm_dir):
+                    if jf.endswith(".json"):
+                        pkg_name = jf[:-5]
+                        try:
+                            with open(os.path.join(perm_dir, jf)) as f:
+                                profiles[pkg_name] = json.load(f)
+                        except Exception:
+                            pass
+
+            apk_pkgs = []
+            if os.path.isdir(priv_app):
+                for pkg_dir in sorted(os.listdir(priv_app)):
+                    pkg_path = os.path.join(priv_app, pkg_dir)
+                    if os.path.isdir(pkg_path):
+                        apk_files = [f for f in os.listdir(pkg_path) if f.endswith(".apk")]
+                        if apk_files:
+                            apk_pkgs.append((pkg_dir, apk_files))
+
+            print(f"\nSystem Apps ({LSP_IMAGE_NAME}) [{LSP_LABEL}]")
+            print("-" * 50)
+
+            if not apk_pkgs:
+                print("  (no system apps installed)")
+            else:
+                for pkg, apk_files in apk_pkgs:
+                    profile = profiles.get(pkg, {})
+                    privapp = profile.get("privapp_perms", [])
+                    runtime = profile.get("runtime_perms", [])
+                    print(f"\n  {pkg}")
+                    for apk in apk_files:
+                        apk_path = os.path.join(priv_app, pkg, apk)
+                        apk_size = os.path.getsize(apk_path)
+                        print(f"    APK: {apk} ({apk_size:,} bytes)")
+                    print(f"    Privileged: {len(privapp)} permissions")
+                    print(f"    Runtime: {len(runtime)} permissions")
+
+            print(f"\nTotal: {len(apk_pkgs)} app(s)")
+        finally:
+            shutil.rmtree(LSP_TEMP, ignore_errors=True)
+
+    def uninstall_boltware(self, apk_name=None, initrd_path=None, mode=None):
+        if initrd_path:
+            if not os.path.exists(initrd_path):
+                print(f"File not found: {initrd_path}")
+                return
+            initrd = InitrdManager(initrd_path)
+        else:
+            wsa_path = WSADetector.find_path()
+            if not wsa_path:
+                print("WSA not found!")
+                return
+            initrd_path = WSADetector.initrd_path(wsa_path)
+            if not os.path.exists(initrd_path):
+                print("Recovery system not found!")
+                return
+            initrd = InitrdManager(initrd_path)
+
+        if initrd.is_stock():
+            print("Recovery system: STOCK (no TWRP)")
+            return
+
+        modes = ["admin", "user"] if mode is None else [mode]
+        pending = []
+        for m in modes:
+            select_image(m)
+            pending.extend(self._uninstall_boltware_image(initrd, apk_name))
+        pending = list(dict.fromkeys(pending))
+        if pending:
+            initrd.patch_postfsdata_uninstall()
+            initrd.inject_uninstall_txt(pending)
+            print(f"Uninstall scheduled for {len(pending)} package(s) on next boot")
+
+    def _uninstall_boltware_image(self, initrd, apk_name):
+        arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
+        schedule = []
+
+        if apk_name is None:
+            if not CpioUtils.has_file(initrd.path, arcname):
+                print(f"[{LSP_LABEL}] {LSP_IMAGE_NAME} not present, nothing to remove")
+                return schedule
+            extract_dir = initrd.extract_lsp_image()
+            all_packages = []
+            if extract_dir:
+                priv_app = os.path.join(extract_dir, "system", "priv-app")
+                if os.path.isdir(priv_app):
+                    for d in os.listdir(priv_app):
+                        if os.path.isdir(os.path.join(priv_app, d)):
+                            all_packages.append(d)
+                shutil.rmtree(extract_dir, ignore_errors=True)
+            CpioUtils.delete_file(initrd.path, arcname)
+            print(f"Removed {LSP_IMAGE_NAME} entirely")
+            return all_packages
+
+        if not initrd.has_lsp_image():
+            print(f"[{LSP_LABEL}] {LSP_IMAGE_NAME} not present")
+            return [apk_name]
+
+        extract_dir = initrd.extract_lsp_image()
+        if not extract_dir:
+            print("Failed to extract image")
+            return schedule
+
+        try:
+            pkg_dir = os.path.join(extract_dir, "system", "priv-app", apk_name)
+            perm_file = os.path.join(extract_dir, "permissions", f"{apk_name}.json")
+
+            removed_something = False
+
+            if os.path.isdir(pkg_dir):
+                shutil.rmtree(pkg_dir)
+                print(f"Removed system/priv-app/{apk_name}/")
+                removed_something = True
+
+            if os.path.isfile(perm_file):
+                os.remove(perm_file)
+                print(f"Removed permissions/{apk_name}.json")
+                removed_something = True
+
+            if not removed_something:
+                print(f"{apk_name} not found in image")
+            else:
+                priv_app = os.path.join(extract_dir, "system", "priv-app")
+                remaining = []
+                if os.path.isdir(priv_app):
+                    for d in os.listdir(priv_app):
+                        if os.path.isdir(os.path.join(priv_app, d)):
+                            remaining.append(d)
+
+                if not remaining:
+                    CpioUtils.delete_file(initrd.path, arcname)
+                    print(f"Image empty, removed {LSP_IMAGE_NAME} entirely")
+                else:
+                    initrd.repack_lsp_image()
+                    print(f"Removed {apk_name} from {LSP_IMAGE_NAME}")
+
+            return [apk_name]
+        finally:
+            shutil.rmtree(LSP_TEMP, ignore_errors=True)
+
+    def install_magisk_hook(self, initrd_path=None):
+        return self._launch_gui(self._flow_install_magisk_hook, dict(
+            target_initrd=initrd_path,
+        ))
+
+    def repair_magisk_hook(self, initrd_path=None):
+        return self._launch_gui(self._flow_install_magisk_hook, dict(
+            target_initrd=initrd_path,
+            force=True,
+        ))
+
+    @staticmethod
+    def _choose_backup_file(path):
+        """Pick one <file>.img.bak-* next to `path`; None when cancelled."""
+        folder = os.path.dirname(path) or "."
+        prefix = os.path.basename(path) + ".bak-"
+        try:
+            found = sorted(name for name in os.listdir(folder)
+                           if name.startswith(prefix))
+        except OSError:
+            return None
+        if not found:
+            return None
+        picked, ok = QInputDialog.getItem(
+            None, APP_NAME, "Backup:", found, 0, False)
+        if not ok or not picked:
+            return None
+        return os.path.join(folder, picked)
+
+    def manage_img(self, initrd_path=None):
+        """Open the IMG Manager window.
+
+        Sole caller is the --gui branch of main(); no other flow reaches it.
+        """
+        _debug(f"manage_img({initrd_path})")
+        # QApplication must exist before ANY QMessageBox/QFileDialog call
+        # (right-click "Open with" can reach those before the window opens).
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication(sys.argv)
+        app.setApplicationName(APP_NAME)
+        app.setStyle("Fusion")
+        path = initrd_path
+        if path:
+            if not os.path.isfile(path):
+                QMessageBox.critical(None, APP_NAME, f"File not found:\n{path}")
+                return 1
+        else:
+            wsa = WSADetector.find_path()
+            if wsa:
+                candidate = os.path.join(wsa, "Tools", "initrd.img")
+                if os.path.isfile(candidate):
+                    path = candidate
+                else:
+                    _debug(f"manage_img: not present: {candidate}")
+            else:
+                _debug("manage_img: WSADetector.find_path() -> None")
+            if not path:
+                path, _filter = QFileDialog.getOpenFileName(
+                    None, "Select initrd.img", "",
+                    "Images (*.img);;All files (*.*)")
+                if not path:
+                    print("  No image selected.", flush=True)
+                    return 1
+
+        source = None
+        failure = None
+        try:
+            entries = CpioUtils.list_entries(path)
+            if not entries:
+                failure = "Empty cpio image."
+        except Exception as exc:
+            entries = []
+            failure = f"Not a readable cpio image: {exc}"
+
+        if failure:
+            answer = QMessageBox.question(
+                None, APP_NAME,
+                f"{failure}\n{path}\n\n"
+                "The live image cannot be opened.\n"
+                "Load one of its backups instead?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                QMessageBox.critical(None, APP_NAME, f"{failure}:\n{path}")
+                return 1
+            source = self._choose_backup_file(path)
+            if not source:
+                return 1
+            try:
+                entries = CpioUtils.list_entries(source)
+            except Exception as exc:
+                QMessageBox.critical(
+                    None, APP_NAME,
+                    f"Backup is unreadable:\n{source}\n\n{exc}")
+                return 1
+            if not entries:
+                QMessageBox.critical(None, APP_NAME, f"Backup is empty:\n{source}")
+                return 1
+
+        if source:
+            _log(f"Opening IMG Manager from backup: {source} -> {path}")
+        else:
+            _log(f"Opening IMG Manager: {path} ({len(entries)} entries)")
+        window = ImgManagerWindow(path, source_path=source)
+        screen = app.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            window.move(
+                available.center().x() - window.width() // 2,
+                available.center().y() - window.height() // 2,
+            )
+        window.show()
+        result = app.exec()
+        self._cleanup()
+        return result
+
+    def _flow_install_magisk_hook(self, log, window, target_initrd=None, force=False):
+        is_wsa_img = False
+        if target_initrd:
+            initrd_path = target_initrd
+            if not os.path.exists(initrd_path):
+                log(f"File not found: {initrd_path}")
+                time.sleep(2)
+                window.request_close()
+                return
+            log(f"File: {os.path.basename(initrd_path)} ({os.path.getsize(initrd_path):,} bytes)")
+            wsa_path = WSADetector.find_path()
+            if wsa_path:
+                if os.path.normpath(initrd_path) == os.path.normpath(WSADetector.initrd_path(wsa_path)):
+                    is_wsa_img = True
+                    log("Detected: WSA recovery system")
+                else:
+                    log("Detected: external file (not WSA)")
+            else:
+                log("Detected: standalone file (no WSA)")
+        else:
+            log("Checking WSA installation...")
+            time.sleep(1)
+            wsa_path = WSADetector.find_path()
+            if not wsa_path:
+                log("WSA not found!")
+                time.sleep(2)
+                window.request_close()
+                return
+            log(f"WSA found: {os.path.basename(wsa_path)}")
+            initrd_path = WSADetector.initrd_path(wsa_path)
+            if not os.path.exists(initrd_path):
+                log("Recovery system not found!")
+                time.sleep(2)
+                window.request_close()
+                return
+            is_wsa_img = True
+        time.sleep(0.5)
+
+        initrd = InitrdManager(initrd_path)
+
+        existing = {name for name, *_ in CpioUtils.scan_entries(initrd.path)}
+        hook_present = POSTFSDATA_ARCNAME in existing
+        if hook_present and not force:
+            issues = initrd.hook_issues()
+            if not issues:
+                log("Magisk hook already installed, nothing to do")
+                log("")
+                log("To install apps as system app:")
+                log(f"  {CLI_NAME} --install-as-system-app <path_of_apk>")
+                log(f"  {CLI_NAME} --install-as-system-app <path_of_apk> --admin")
+                time.sleep(2)
+                window.request_close()
+                return
+
+            log("Magisk hook found with problems:")
+            for issue in issues:
+                log(f"  - {issue}")
+            if is_wsa_img:
+                log("Stopping WSA...")
+                KillWSA.kill_all()
+                time.sleep(3)
+            else:
+                log("Patching file directly...")
+            initrd.repair_hook_infrastructure()
+            log("Magisk hook repaired")
+
+            if is_wsa_img:
+                log("Starting WSA...")
+                WSADetector.ensure_running()
+                time.sleep(15)
+            time.sleep(2)
+            window.request_close()
+            return
+
+        if is_wsa_img:
+            log("Stopping WSA...")
+            KillWSA.kill_all()
+            time.sleep(3)
+        else:
+            log("Patching file directly...")
+
+        if force and hook_present:
+            log("Overriding existing Magisk hook (full rebuild from fix.7z)...")
+            hook_ok = initrd.override_hook_infrastructure()
+        else:
+            log("Installing Magisk hook...")
+            hook_ok = initrd.add_hook_infrastructure()
+        if hook_ok:
+            log("Magisk hook installed successfully!")
+            log("")
+            log("To install apps as system app:")
+            log(f"  {CLI_NAME} --install-as-system-app <path_of_apk>")
+            log("")
+            log("To list installed system apps:")
+            log(f"  {CLI_NAME} --list-of-boltware")
+            log("")
+            log("To uninstall a system app:")
+            log(f"  {CLI_NAME} --uninstall-boltware <package_name>")
+        else:
+            log("Failed to install Magisk hook!")
+
+        if is_wsa_img:
+            log("Starting WSA...")
+            WSADetector.ensure_running()
+            time.sleep(15)
+
+        time.sleep(2)
+        window.request_close()
 
 
 def _parse_into(args_list):
@@ -2627,29 +6345,44 @@ def _parse_into(args_list):
 
 
 def main():
-    global DEBUG
+    global DEBUG, LOG_FOR_USER
     parser = argparse.ArgumentParser(
         description=f"{APP_NAME} v{APP_VERSION}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
 Examples:
-  twrp.py                                              Auto-inject + boot TWRP
-  twrp.py --path C:\\initrd.img                         Patch specific file
-  twrp.py --status                                     Check WSA status
-  twrp.py --status --path C:\\initrd.img               Check specific file
-  twrp.py --enable-twrp                                Set recovery flag
-  twrp.py --enable-twrp --path C:\\initrd.img          Set flag in file
-  twrp.py --disable-twrp                               Clear recovery flag
-  twrp.py --disable-twrp --path C:\\initrd.img         Clear flag in file
-  twrp.py --inject-file info.json                      Inject file
-  twrp.py --inject-file info.json into /info/          Inject into subfolder
-  twrp.py --inject-folder assest/twrp/                 Inject folder
-  twrp.py --inject assets/test.7z                      Extract 7z + patch.json
-  twrp.py --install-as-system-app app.apk              Install APK as system app
-  twrp.py --install-as-system-app a.apk b.apk          Install multiple APKs
+  {CLI_NAME}                                              Auto-inject + boot TWRP
+  {CLI_NAME} --path C:\\initrd.img                         Patch specific file
+  {CLI_NAME} --status                                     Check WSA status
+  {CLI_NAME} --status --path C:\\initrd.img               Check specific file
+  {CLI_NAME} --enable-twrp                                Set recovery flag
+  {CLI_NAME} --enable-twrp --path C:\\initrd.img          Set flag in file
+  {CLI_NAME} --disable-twrp                               Clear recovery flag
+  {CLI_NAME} --disable-twrp --path C:\\initrd.img         Clear flag in file
+  {CLI_NAME} --inject-file info.json                      Inject file
+  {CLI_NAME} --inject-file info.json into /info/          Inject into subfolder
+  {CLI_NAME} --inject-folder assest/twrp/                 Inject folder
+  {CLI_NAME} --inject assets/test.7z                      Extract 7z + patch.json
+  {CLI_NAME} --install-as-system-app app.apk              Install APK as system app
+  {CLI_NAME} --install-as-system-app a.apk b.apk          Install multiple APKs
+  {CLI_NAME} --list-of-boltware                           List system apps
+  {CLI_NAME} --uninstall-boltware com.wsa.webdav          Remove specific app
+  {CLI_NAME} --uninstall-boltware                          Remove all system apps
+  {CLI_NAME} --install-as-system-app app.apk              Install into USER module (default)
+  {CLI_NAME} --install-as-system-app app.apk --admin      Install into ADMIN module (password)
+  {CLI_NAME} --update-as-system-app app.apk --admin       Update inside ADMIN module (password)
+  {CLI_NAME} --list-of-boltware --user                    List apps in USER module only
+  {CLI_NAME} --install-magisk-hook                         Install Magisk hook only
+  {CLI_NAME} --repaire-magisk-hook                         Force rebuild Magisk hook (overrides existing)
+  {CLI_NAME} --gui                                         Open the initrd.img file manager GUI
+  {CLI_NAME} --gui --path C:\\initrd.img                   Manage a specific file
+  {CLI_NAME} --register-img                                Add .img -> Open with -> WSA IMG Manager
+  {CLI_NAME} --unregister-img                              Remove the .img Open with entries
         """)
     parser.add_argument("--status", action="store_true",
                         help="Check WSA and TWRP status")
+    parser.add_argument("--gui", action="store_true",
+                        help="Open the initrd.img file manager GUI (extract/delete/rename/overwrite)")
     parser.add_argument("--disable-twrp", action="store_true",
                         help="Clear recovery flag (force normal boot)")
     parser.add_argument("--enable-twrp", action="store_true",
@@ -2666,18 +6399,54 @@ Examples:
                         help="Install APK(s) as system app: --install-as-system-app APK1 [APK2 ...]")
     parser.add_argument("--update-as-system-app", nargs='+', default=None,
                         help="Update/reinstall APK(s) as system app (overrides existing)")
+    parser.add_argument("--list-of-boltware", action="store_true",
+                        help="List all system apps in both module images")
+    parser.add_argument("--uninstall-boltware", nargs='?', const="", default=None,
+                        help="Remove app from the module images (no arg = remove entire image)")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--admin", action="store_true",
+                            help="Target the ADMIN module image lsp_wsa-installer.img "
+                                 "(id wsa-installer). Password protected.")
+    mode_group.add_argument("--user", action="store_true",
+                            help="Target the USER module image lsp_wsa-installer-user.img "
+                                 "(id wsa-installer-user). Default for install/update.")
+    parser.add_argument("--install-magisk-hook", action="store_true",
+                        help="Install Magisk hook infrastructure only")
+    parser.add_argument("--repaire-magisk-hook", "--repair-magisk-hook",
+                        action="store_true", dest="repair_magisk_hook",
+                        help="Force rebuild of the Magisk hook, overriding an existing one")
+    parser.add_argument("--register-img", action="store_true",
+                        help="Register .img files -> Open with -> WSA IMG Manager (Explorer)")
+    parser.add_argument("--unregister-img", action="store_true",
+                        help="Remove the .img Open with / context-menu registration")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug output")
     args = parser.parse_args()
 
     if args.debug:
         DEBUG = True
+        LOG_FOR_USER = True
         _debug("Debug mode enabled")
 
     _debug(f"args: status={args.status}, path={args.path}, enable={args.enable_twrp}, "
            f"disable={args.disable_twrp}, inject_file={args.inject_file}, "
            f"inject_folder={args.inject_folder}, inject={args.inject}, "
            f"install_as_system_app={args.install_as_system_app}")
+    mode = "admin" if args.admin else ("user" if args.user else None)
+    _debug(f"mode: {mode or 'default'}")
+
+    if args.register_img:
+        _debug("Command: --register-img")
+        sys.exit(register_img_handler())
+
+    if args.unregister_img:
+        _debug("Command: --unregister-img")
+        sys.exit(unregister_img_handler())
+
+    if args.gui:
+        _debug("Command: --gui")
+        twrp = WSATWRP()
+        sys.exit(twrp.manage_img(initrd_path=args.path))
 
     if args.status:
         _debug("Command: --status")
@@ -2703,6 +6472,7 @@ Examples:
         twrp.install_as_system_app(
             apk_paths=args.install_as_system_app,
             target_initrd=args.path,
+            mode=mode,
         )
         return
 
@@ -2713,7 +6483,36 @@ Examples:
             apk_paths=args.update_as_system_app,
             target_initrd=args.path,
             force_update=True,
+            mode=mode,
         )
+        return
+
+    if args.list_of_boltware:
+        _debug("Command: --list-of-boltware")
+        twrp = WSATWRP()
+        twrp.list_boltware(initrd_path=args.path, mode=mode)
+        return
+
+    if args.uninstall_boltware is not None:
+        _debug("Command: --uninstall-boltware")
+        twrp = WSATWRP()
+        twrp.uninstall_boltware(
+            apk_name=args.uninstall_boltware or None,
+            initrd_path=args.path,
+            mode=mode,
+        )
+        return
+
+    if args.repair_magisk_hook:
+        _debug("Command: --repaire-magisk-hook")
+        twrp = WSATWRP()
+        twrp.repair_magisk_hook(initrd_path=args.path)
+        return
+
+    if args.install_magisk_hook:
+        _debug("Command: --install-magisk-hook")
+        twrp = WSATWRP()
+        twrp.install_magisk_hook(initrd_path=args.path)
         return
 
     inject_file, inject_folder, inject_7z = None, None, None
