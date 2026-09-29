@@ -94,9 +94,13 @@ twrp.py --repaire-magisk-hook        # alias: --repair-magisk-hook
 # Remove the hook entirely (wsainit becomes /init again, overlay.d/ goes)
 twrp.py --uninstall-magisk-hook
 
+# Clear the pending uninstall list (run after the boot that applied it)
+twrp.py --cleanup-uninstall
+
 # Either against the live WSA image or a detached file
 twrp.py --install-magisk-hook --path C:\initrd.img
 twrp.py --uninstall-magisk-hook --path C:\initrd.img
+twrp.py --cleanup-uninstall --path C:\initrd.img
 ```
 
 Install and repair launch the same windowed flow
@@ -124,6 +128,14 @@ Removals are *scheduled*, not executed immediately:
    `overlay.d/sbin/uninstall.txt` — one package per line.
 
 On the next boot the handler consumes the list and removes those packages.
+
+The handler deletes only its **runtime copy** — `uninstall.txt` itself lives
+inside `initrd.img`, so the archive entry survives every reboot and the same
+list would run again on the next boot (a later reinstall would be removed
+again!). **After the removal boot, clear it**: `twrp.py --cleanup-uninstall`
+(GUI: **Uninstall temp cleanup** button), which deletes the file from the
+image and leaves the handler in place (a harmless no-op without the list).
+
 See [Boltware Manager](boltware-manager.md).
 
 ---
@@ -147,5 +159,6 @@ See [Boltware Manager](boltware-manager.md).
 | Hook present but apps not mounted | `hook_issues()` will name the wrong mode / missing dir; run `--repaire-magisk-hook` |
 | Hook needs to go entirely | `--uninstall-magisk-hook` — restores `wsainit -> init`, removes the payload and the whole `overlay.d/` tree |
 | Uninstall "did nothing" | removal happens on the **next boot**; check the log in `/storage/emulated/0/WSA Installer/` |
+| Reinstalled app removed again on next boot | stale `uninstall.txt` still inside the image — run `twrp.py --cleanup-uninstall` after the removal boot |
 
 See also: [Admin & User Modules](admin-user-modules.md) · [Boltware Manager](boltware-manager.md) · [Flow](flow.md)

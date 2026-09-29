@@ -121,7 +121,7 @@ The official WSA installation does not include any recovery mode. If something g
 | Boltware Manager | `--list-of-boltware` / `--uninstall-boltware` across both images, de-duplicated |
 | Magisk Hook | `--install-magisk-hook` / `--repaire-magisk-hook` with a `hook_issues()` audit |
 | Hook Removal | `--uninstall-magisk-hook` — `wsainit → /init` restored, `overlay.d/` tree removed |
-| Scheduled Uninstall | Removals written to `uninstall.txt` and applied on next boot |
+| Scheduled Uninstall | Removals written to `uninstall.txt` and applied on next boot; clear afterwards with `--cleanup-uninstall` |
 
 ### TWRP Recovery Features
 
@@ -236,6 +236,7 @@ Restart WSA. Android boots normally.
 | `twrp.exe --update-as-system-app app.apk` | Overwrite an existing system app |
 | `twrp.exe --list-of-boltware` | List system apps in both module images |
 | `twrp.exe --uninstall-boltware com.example.app` | Schedule removal on next boot |
+| `twrp.exe --cleanup-uninstall` | Clear `uninstall.txt` after the removal boot (GUI: **Uninstall temp cleanup**) |
 | `twrp.exe --install-magisk-hook` | Install the boot hook only |
 | `twrp.exe --repaire-magisk-hook` | Force-rebuild the hook from `fix.7z` |
 | `twrp.exe --uninstall-magisk-hook` | Remove the hook (`wsainit` becomes `/init` again) |

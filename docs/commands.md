@@ -25,6 +25,7 @@ Complete reference for all `twrp.exe` commands and options.
   - [--admin / --user](#--admin--user)
   - [--list-of-boltware](#--list-of-boltware)
   - [--uninstall-boltware](#--uninstall-boltware)
+  - [--cleanup-uninstall](#--cleanup-uninstall)
   - [--install-magisk-hook](#--install-magisk-hook)
   - [--repaire-magisk-hook](#--repaire-magisk-hook)
   - [--uninstall-magisk-hook](#--uninstall-magisk-hook)
@@ -426,8 +427,23 @@ twrp.exe --uninstall-boltware [PACKAGE…] [--admin | --user]
 
 No package argument = remove the whole module image. Packages are merged and
 de-duplicated across the selected images, written to `overlay.d/sbin/uninstall.txt`
-once, and removed **on the next boot**.
+once, and removed **on the next boot**. After that boot, clear the list with
+[`--cleanup-uninstall`](#--cleanup-uninstall).
 Full guide: [Boltware Manager](boltware-manager.md).
+
+---
+
+### --cleanup-uninstall
+
+```cmd
+twrp.exe --cleanup-uninstall [--path <initrd.img>]
+```
+
+Deletes `overlay.d/sbin/uninstall.txt`. The boot handler only removes its
+runtime copy, so the archive entry would re-run the same list on **every**
+boot — and uninstall the app again after a later reinstall. Run it **once
+after the boot that applied an uninstall**. The handler itself stays (a
+harmless no-op without the file). GUI: **Uninstall temp cleanup** button.
 
 ---
 

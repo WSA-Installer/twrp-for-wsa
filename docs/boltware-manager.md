@@ -4,7 +4,7 @@
 
 Added after `4.1.0`. Code: `twrp.py` (`list_boltware()`, `_list_lsp_apps()`,
 `uninstall_boltware()`, `_uninstall_boltware_image()`). CLI:
-`--list-of-boltware`, `--uninstall-boltware`.
+`--list-of-boltware`, `--uninstall-boltware`, `--cleanup-uninstall`.
 
 "Boltware" is this project's term for apps baked into the recovery image as
 system apps.
@@ -53,6 +53,7 @@ if pending:
     initrd.patch_postfsdata_uninstall()       # write the boot handler
     initrd.inject_uninstall_txt(pending)      # write uninstall.txt
     print(f"Uninstall scheduled for {len(pending)} package(s) on next boot")
+    # + IMPORTANT note: run --cleanup-uninstall after the removal boot
 ```
 
 Key points:
@@ -63,6 +64,11 @@ Key points:
 * Nothing is executed immediately: the handler added to
   `overlay.d/sbin/post-fs-data.sh` runs it on the next boot
   (see [Magisk Hook](magisk-hook.md)).
+* `uninstall.txt` lives **inside the image** (RAMdisk) — the handler deletes
+  only its runtime copy, so the archive entry re-runs the same list on every
+  later boot. **After the removal boot, clear it** with
+  `twrp.py --cleanup-uninstall` (GUI: **Uninstall temp cleanup**), otherwise a
+  later reinstall is uninstalled again on the next boot.
 * `apk_name` omitted → `_uninstall_boltware_image(initrd, None)` removes the
   entire module image (`overlay.d/sbin/lsp_wsa-installer[-user].img`).
 
@@ -77,6 +83,7 @@ twrp.py --uninstall-boltware com.example.old    # schedule removal (both images)
 twrp.py --list-of-boltware                      # image still listed until reboot
 # ... reboot WSA ...
 twrp.py --list-of-boltware                      # now gone
+twrp.py --cleanup-uninstall                     # clear the pending list (do this!)
 ```
 
 ---
@@ -91,5 +98,6 @@ twrp.py --list-of-boltware                      # now gone
 | Still listed after uninstall | expected — removal happens on the **next boot** |
 | App removed from one module only | it exists in both; re-run without `--admin` / `--user` |
 | `Uninstall scheduled for 0 package(s)` | the package name did not match any entry; check `--list-of-boltware` for the exact id |
+| Reinstalled app disappears again on next boot | stale `uninstall.txt` re-ran — run `twrp.py --cleanup-uninstall` (GUI: **Uninstall temp cleanup**) after the removal boot |
 
 See also: [Admin & User Modules](admin-user-modules.md) · [Magisk Hook](magisk-hook.md) · [Commands](commands.md)

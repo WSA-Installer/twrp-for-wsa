@@ -25,6 +25,7 @@ Detailed reference for all `twrp.exe` commands and options.
   - [--admin / --user](#--admin--user)
   - [--list-of-boltware](#--list-of-boltware)
   - [--uninstall-boltware](#--uninstall-boltware)
+  - [--cleanup-uninstall](#--cleanup-uninstall)
   - [--install-magisk-hook](#--install-magisk-hook)
   - [--repaire-magisk-hook](#--repaire-magisk-hook)
   - [--uninstall-magisk-hook](#--uninstall-magisk-hook)
@@ -530,8 +531,35 @@ twrp.exe --uninstall-boltware --user           # USER image only
 Packages are collected from every selected image, de-duplicated, written to
 `overlay.d/sbin/uninstall.txt` **once**, and the boot handler in
 `post-fs-data.sh` is (re)written. Nothing is removed until WSA reboots.
+After that boot has removed the app, clear the list with
+[`--cleanup-uninstall`](#--cleanup-uninstall) (next section).
 
 See [Boltware Manager](boltware-manager.md).
+
+---
+
+### --cleanup-uninstall
+
+Delete `overlay.d/sbin/uninstall.txt` (the pending uninstall list) from the
+image. Added after 4.1.0.
+
+```cmd
+twrp.exe --cleanup-uninstall
+twrp.exe --cleanup-uninstall --path <initrd.img>
+```
+
+**Why it exists:** the boot handler deletes only its *runtime copy* of
+`uninstall.txt` — the archive entry inside `initrd.img` survives every
+reboot, so the same list runs on **every** boot. Reinstalling the app days
+later would have it uninstalled again on the next boot.
+
+Run it **once after the boot that applied an uninstall** (the removal is
+logged next to the handler, see `post-fs-data.log`). The handler in
+`post-fs-data.sh` stays — it is a harmless no-op without the file and remains
+ready for the next `--uninstall-boltware`.
+
+GUI: the **Uninstall temp cleanup** button (IMG Manager, hook row, right
+side); it shows the package names it cleared.
 
 ---
 

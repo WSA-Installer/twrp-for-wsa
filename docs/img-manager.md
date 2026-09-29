@@ -110,6 +110,7 @@ and `_on_cli()` dispatches to `self._cli_<key>()`:
 | 3 | **Uninstall TWRP** | `_cli_uninstall_twrp()` | confirm (`wsainit`/`overlay.d` are *not* touched) → `_flow_uninstall_twrp` (removes `/sbin/twrp`, `/twres/`, `/etc/`, `/system/lib64/`, `init -> lspinit`, clears both flags) |
 | 3 | **Install hook** / **Repair hook** | `_cli_install_hook()` / `_cli_repair_hook()` | `_flow_install_magisk_hook(force=False/True)` |
 | 3 | **Uninstall hook** | `_cli_uninstall_hook()` | confirm (explains `wsainit -> init` and that the whole `overlay.d/` tree — module images included — goes) → `_flow_uninstall_magisk_hook` |
+| 3 | **Uninstall temp cleanup** | `_cli_cleanup_uninstall()` | `_confirm_live()` → `_flow_cleanup_uninstall`: shows the package names in `overlay.d/sbin/uninstall.txt` and deletes the file (post-uninstall cleanup; the handler in `post-fs-data.sh` stays) |
 | 4 | **Status** | `_cli_status()` | `WSATWRP.status()` |
 | 4 | **List system apps** | `_cli_list_apps()` | `list_boltware()` (admin + user modules) |
 | 4 | **Uninstall system app…** | `_cli_uninstall_app()` | package-name prompt → `uninstall_boltware()` |
@@ -182,7 +183,8 @@ copy /Y "C:\...\Tools\initrd.img.bak-20260928-101500" "C:\...\Tools\initrd.img"
 * Toolbar rows: (1) open, refresh, add file, add folder, new folder, rename,
   delete, extract, edit, apply, backup, restore (`_act_*`); (2) info, install /
   update system app + Admin tick, enable / disable TWRP; (3) install / repair /
-  uninstall TWRP, install / repair / uninstall hook; (4) status, list /
+  uninstall TWRP, install / repair / uninstall hook + uninstall temp cleanup;
+  (4) status, list /
   uninstall system app, register / unregister `.img` (`_cli_*`)
 * `wheelEvent` / `_max_scroll` / `_hit` handle tree scrolling; `_fill`,
   `_refresh_buttons`, `_update_status` keep the chrome in sync

@@ -4529,12 +4529,22 @@ class ImgManagerWindow(QWidget):
         ("install_hook", "Install hook"),
         ("repair_hook", "Repair hook"),
         ("uninstall_hook", "Uninstall hook"),
+        ("cleanup_uninstall", "Uninstall temp cleanup"),
         ("status", "Status"),
         ("list_apps", "List system apps"),
         ("uninstall_app", "Uninstall system app\u2026"),
         ("register_img", "Register .img"),
         ("unregister_img", "Unregister .img"),
     )
+
+    # Extra hover text for individual _CLI_ACTIONS buttons (key -> tooltip).
+    _BTN_TOOLTIPS = {
+        "cleanup_uninstall":
+            "Delete overlay.d/sbin/uninstall.txt (the pending uninstall list)\n"
+            "from the image. Run it ONCE after the boot that applied an\n"
+            "uninstall - otherwise the same list runs on every boot and\n"
+            "would remove the app again if you reinstall it later.",
+    }
 
     _BTN_STYLE = """
         QPushButton {
@@ -4712,7 +4722,8 @@ class ImgManagerWindow(QWidget):
         for key in ("install_twrp", "repair_twrp", "uninstall_twrp"):
             row3.addWidget(self._cli_button(cli[key], key))
         row3.addStretch(1)
-        for key in ("install_hook", "repair_hook", "uninstall_hook"):
+        for key in ("install_hook", "repair_hook", "uninstall_hook",
+                    "cleanup_uninstall"):
             row3.addWidget(self._cli_button(cli[key], key))
         outer.addLayout(row3)
 
@@ -5233,6 +5244,9 @@ class ImgManagerWindow(QWidget):
         btn.setCursor(Qt.PointingHandCursor)
         btn.setFocusPolicy(Qt.NoFocus)
         btn.setStyleSheet(self._BTN_STYLE)
+        tip = self._BTN_TOOLTIPS.get(key)
+        if tip:
+            btn.setToolTip(tip)
         btn.clicked.connect(lambda _checked=False, k=key: self._on_cli(k))
         return btn
 
@@ -5604,6 +5618,15 @@ class ImgManagerWindow(QWidget):
         dlg = LogDialog("Uninstall Magisk hook", self)
         dlg.finished.connect(lambda _r: self._after_live_change())
         dlg.run_flow(self._twrp._flow_uninstall_magisk_hook,
+                     dict(target_initrd=self._real_path))
+        dlg.show()
+
+    def _cli_cleanup_uninstall(self):
+        if not self._confirm_live("clean up the pending uninstall list"):
+            return
+        dlg = LogDialog("Uninstall temp cleanup", self)
+        dlg.finished.connect(lambda _r: self._after_live_change())
+        dlg.run_flow(self._twrp._flow_cleanup_uninstall,
                      dict(target_initrd=self._real_path))
         dlg.show()
 
@@ -7336,6 +7359,12 @@ class WSATWRP:
             initrd.patch_postfsdata_uninstall()
             initrd.inject_uninstall_txt(pending)
             print(f"Uninstall scheduled for {len(pending)} package(s) on next boot")
+            print("IMPORTANT: uninstall.txt lives inside the image and the list "
+                  "runs on EVERY boot.")
+            print("After the next boot has removed the app, run "
+                  "--cleanup-uninstall ('Uninstall temp cleanup' in the manager)")
+            print("to clear it - otherwise a later reinstall would be removed "
+                  "again on the next boot.")
 
     def _uninstall_boltware_image(self, initrd, apk_name):
         arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
@@ -7419,6 +7448,11 @@ class WSATWRP:
 
     def uninstall_magisk_hook(self, initrd_path=None):
         return self._launch_gui(self._flow_uninstall_magisk_hook, dict(
+            target_initrd=initrd_path,
+        ))
+
+    def cleanup_uninstall(self, initrd_path=None):
+        return self._launch_gui(self._flow_cleanup_uninstall, dict(
             target_initrd=initrd_path,
         ))
 
@@ -7732,6 +7766,42 @@ class WSATWRP:
         time.sleep(1)
         window.request_close()
 
+    def _flow_cleanup_uninstall(self, log, window, target_initrd=None):
+        """Delete overlay.d/sbin/uninstall.txt - the pending uninstall list.
+
+        The boot handler consumes its runtime copy but the archive entry in
+        initrd.img survives every reboot, so the same list would keep running
+        on each boot (and remove the app again after a later reinstall).
+        """
+        _debug("_flow_cleanup_uninstall() started")
+        resolved = self._resolve_initrd(log, window, target_initrd)
+        if resolved is None:
+            return
+        initrd_path, is_wsa_img = resolved
+
+        arcname = "overlay.d/sbin/uninstall.txt"
+        if not CpioUtils.has_file(initrd_path, arcname):
+            log("No uninstall.txt - nothing to clean")
+            time.sleep(2)
+            window.request_close()
+            return
+
+        try:
+            data = CpioUtils.read_file(initrd_path, arcname)
+        except Exception:
+            data = b""
+        packages = [line.strip() for line
+                    in data.decode("utf-8", "replace").splitlines()
+                    if line.strip()]
+        if packages:
+            log(f"Scheduled list: {', '.join(packages)}")
+        log(f"Removing /{arcname}...")
+        CpioUtils.delete_file(initrd_path, arcname)
+        log(f"Removed uninstall.txt ({len(packages)} package(s) cleared)")
+        log("The boot handler will no longer re-run these uninstalls")
+        time.sleep(1)
+        window.request_close()
+
 
 def _parse_into(args_list):
     if args_list is None:
@@ -7768,6 +7838,7 @@ Examples:
   {CLI_NAME} --list-of-boltware                           List system apps
   {CLI_NAME} --uninstall-boltware com.wsa.webdav          Remove specific app
   {CLI_NAME} --uninstall-boltware                          Remove all system apps
+  {CLI_NAME} --cleanup-uninstall                           Clear uninstall.txt after the removal boot
   {CLI_NAME} --install-as-system-app app.apk              Install into USER module (default)
   {CLI_NAME} --install-as-system-app app.apk --admin      Install into ADMIN module (password)
   {CLI_NAME} --update-as-system-app app.apk --admin       Update inside ADMIN module (password)
@@ -7821,6 +7892,9 @@ Examples:
                         help="Force rebuild of the Magisk hook, overriding an existing one")
     parser.add_argument("--uninstall-magisk-hook", action="store_true",
                         help="Remove the Magisk hook (wsainit is renamed back to /init)")
+    parser.add_argument("--cleanup-uninstall", action="store_true",
+                        help="Delete overlay.d/sbin/uninstall.txt (pending uninstall list); "
+                             "run once after the boot that applied an uninstall")
     parser.add_argument("--install-twrp", action="store_true",
                         help="Install TWRP recovery files and set twrp_support=true")
     parser.add_argument("--repair-twrp", action="store_true",
@@ -7914,6 +7988,12 @@ Examples:
             initrd_path=args.path,
             mode=mode,
         )
+        return
+
+    if args.cleanup_uninstall:
+        _debug("Command: --cleanup-uninstall")
+        twrp = WSATWRP()
+        twrp.cleanup_uninstall(initrd_path=args.path)
         return
 
     if args.repair_magisk_hook:
