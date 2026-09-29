@@ -143,7 +143,9 @@ twrp.exe --uninstall-boltware com.example.app
 ```
 
 The package is added to `uninstall.txt`; the boot hook applies the removal
-on the **next** boot of Android. Details:
+on the **next** boot of Android. The run targets the **USER image by default**
+(add `--admin` for the ADMIN image — a plain run never touches it; to clear an
+app from both modules, run twice). Details:
 [boltware-manager.md](boltware-manager.md).
 
 ### How do I install an APK as a system app?

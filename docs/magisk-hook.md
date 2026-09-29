@@ -129,6 +129,15 @@ Removals are *scheduled*, not executed immediately:
 
 On the next boot the handler consumes the list and removes those packages.
 
+**How the handler finds the list**: it uses
+`UNINSTALL_FILE="$(dirname "$0")/uninstall.txt"` — always *next to itself*,
+never the image root. `init.lsp.magisk.rc` runs the script as
+`sh ${MAGISKTMP}/post-fs-data.sh`, and the archive's `overlay.d/sbin/*` is
+overlaid onto that ramdisk location, so the lookup resolves to
+`${MAGISKTMP}/uninstall.txt` (`/sbin/uninstall.txt`) — the runtime copy of
+archive `overlay.d/sbin/uninstall.txt`, exactly where `--uninstall-boltware`
+writes it and `--cleanup-uninstall` deletes it.
+
 The handler deletes only its **runtime copy** — `uninstall.txt` itself lives
 inside `initrd.img`, so the archive entry survives every reboot and the same
 list would run again on the next boot (a later reinstall would be removed

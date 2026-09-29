@@ -402,8 +402,9 @@ twrp.exe --list-of-boltware --user                  # lsp_wsa-installer-user.img
 ```
 
 Mutually exclusive (`--admin --user` → exit 2). Defaults:
-install/update = `--user`; `--list-of-boltware` / `--uninstall-boltware` with no
-flag scan **both**; `--status` always reports both.
+install/update = `--user`; `--uninstall-boltware` = `--user` (the ADMIN image
+is never touched without `--admin`); `--list-of-boltware` with no flag scans
+**both** (read-only); `--status` always reports both.
 Full guide: [Admin & User Modules](admin-user-modules.md).
 
 ---
@@ -425,8 +426,10 @@ non-stock image.
 twrp.exe --uninstall-boltware [PACKAGE…] [--admin | --user]
 ```
 
-No package argument = remove the whole module image. Packages are merged and
-de-duplicated across the selected images, written to `overlay.d/sbin/uninstall.txt`
+No package argument = remove the whole **USER** module image. Packages are
+merged and de-duplicated **within the selected module** — USER by default,
+`--admin` switches to the ADMIN image (a plain run never touches it; to clear
+both modules, run twice) — written to `overlay.d/sbin/uninstall.txt`
 once, and removed **on the next boot**. After that boot, clear the list with
 [`--cleanup-uninstall`](#--cleanup-uninstall).
 Full guide: [Boltware Manager](boltware-manager.md).

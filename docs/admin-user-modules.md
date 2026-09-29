@@ -94,12 +94,15 @@ def resolve_mode(mode, default="user"):
 |---|---|---|---|
 | `--install-as-system-app` | USER module | ADMIN module (password) | USER module |
 | `--update-as-system-app` | USER module | ADMIN module (password) | USER module |
-| `--list-of-boltware` | **both images** | ADMIN only | USER only |
-| `--uninstall-boltware` | **both images** | ADMIN only | USER only |
+| `--list-of-boltware` | **both images** (read-only) | ADMIN only | USER only |
+| `--uninstall-boltware` | **USER image** | ADMIN only | USER only |
 | `--status` | **both images** | **both images** | **both images** |
 
 `--status` always prints both modules (it loops `for m in ("admin", "user")`),
 because status is a read-only report — the flags only gate *write* operations.
+`--uninstall-boltware` follows the install commands: **no flag = USER image**,
+the ADMIN image is never rewritten without `--admin`. To remove an app from
+both modules, run the command twice (once plain, once with `--admin`).
 
 ---
 
@@ -172,7 +175,7 @@ image, WSA missing), `2` argparse usage error (e.g. `--admin --user` together).
 | `_require_admin_password()` | SHA-256 gate, env override, 3 attempts |
 | `WSATWRP.install_as_system_app(..., mode=)` | install / update, gates `--admin` |
 | `WSATWRP.list_boltware(..., mode=)` | `None` → both images |
-| `WSATWRP.uninstall_boltware(..., mode=)` | collects from selected images, de-duplicates |
+| `WSATWRP.uninstall_boltware(..., mode=)` | `None` → USER image (`--admin` for ADMIN); packages de-duplicated within the module |
 | `WSATWRP.status()` | always reports both images |
 
 ---

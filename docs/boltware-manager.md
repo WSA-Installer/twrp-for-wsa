@@ -36,16 +36,19 @@ Behaviour:
 ## Removing
 
 ```bash
-twrp.py --uninstall-boltware com.wsa.webdav      # one package
-twrp.py --uninstall-boltware                     # no argument = whole image
-twrp.py --uninstall-boltware com.a com.b --user  # several, USER image only
-twrp.py --uninstall-boltware --admin             # ADMIN image only
+twrp.py --uninstall-boltware com.wsa.webdav      # one package (USER image - the default)
+twrp.py --uninstall-boltware                     # no argument = whole USER image
+twrp.py --uninstall-boltware com.a com.b --user  # several, USER image (explicit)
+twrp.py --uninstall-boltware --admin com.x       # one package, ADMIN image (gate)
+twrp.py --uninstall-boltware --admin             # whole ADMIN image (gate)
 ```
 
 ### What happens
 
 ```
-for m in (["admin", "user"] if mode is None else [mode]):
+modes = ["user"] if mode is None else [mode]     # default: USER image only
+print("Module: USER image (default - use --admin for the admin image)")
+for m in modes:
     select_image(m)
     pending.extend(self._uninstall_boltware_image(initrd, apk_name))
 pending = list(dict.fromkeys(pending))        # de-duplicate, keep order
@@ -58,9 +61,11 @@ if pending:
 
 Key points:
 
-* Packages are **collected from every selected image**, then de-duplicated —
-  an app installed in both modules is scheduled exactly once.
-* `uninstall.txt` is injected **once**, with the merged list.
+* Packages are collected from the **selected module image only** — USER by
+  default, ADMIN only with `--admin`. A plain run never extracts or repacks
+  the ADMIN image; to remove an app from both modules, run twice (plain, then
+  `--admin`). `--list-of-boltware` / `--status` still report both modules.
+* `uninstall.txt` is injected **once**, with that module's list.
 * Nothing is executed immediately: the handler added to
   `overlay.d/sbin/post-fs-data.sh` runs it on the next boot
   (see [Magisk Hook](magisk-hook.md)).
@@ -79,7 +84,7 @@ Key points:
 ```bash
 twrp.py --status                                # WSA info + both modules
 twrp.py --list-of-boltware                      # what is installed where
-twrp.py --uninstall-boltware com.example.old    # schedule removal (both images)
+twrp.py --uninstall-boltware com.example.old    # schedule removal (USER image)
 twrp.py --list-of-boltware                      # image still listed until reboot
 # ... reboot WSA ...
 twrp.py --list-of-boltware                      # now gone
@@ -96,7 +101,7 @@ twrp.py --cleanup-uninstall                     # clear the pending list (do thi
 | `WSA not found!` | WSA is not installed / not detected; pass `--path` |
 | `File not found: …` | the `--path` image does not exist |
 | Still listed after uninstall | expected — removal happens on the **next boot** |
-| App removed from one module only | it exists in both; re-run without `--admin` / `--user` |
+| App still present in the other module | one run targets one module only — repeat for the other module (`--admin`, or plain for USER); also expect removal only after the **next boot** |
 | `Uninstall scheduled for 0 package(s)` | the package name did not match any entry; check `--list-of-boltware` for the exact id |
 | Reinstalled app disappears again on next boot | stale `uninstall.txt` re-ran — run `twrp.py --cleanup-uninstall` (GUI: **Uninstall temp cleanup**) after the removal boot |
 

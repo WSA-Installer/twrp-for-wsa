@@ -113,7 +113,7 @@ and `_on_cli()` dispatches to `self._cli_<key>()`:
 | 3 | **Uninstall temp cleanup** | `_cli_cleanup_uninstall()` | `_confirm_live()` → `_flow_cleanup_uninstall`: shows the package names in `overlay.d/sbin/uninstall.txt` and deletes the file (post-uninstall cleanup; the handler in `post-fs-data.sh` stays) |
 | 4 | **Status** | `_cli_status()` | `WSATWRP.status()` |
 | 4 | **List system apps** | `_cli_list_apps()` | `list_boltware()` (admin + user modules) |
-| 4 | **Uninstall system app…** | `_cli_uninstall_app()` | package-name prompt → `uninstall_boltware()` |
+| 4 | **Uninstall system app…** | `_cli_uninstall_app()` | `_admin_gate()` → package-name prompt → `uninstall_boltware(mode=…)` (USER module unless the Admin tick is on) |
 | 4 | **Register .img** / **Unregister .img** | `_cli_register_img()` / `_cli_unregister_img()` | `register_img_handler()` / `unregister_img_handler()` |
 
 ### How a button runs

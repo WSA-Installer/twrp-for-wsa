@@ -5545,6 +5545,9 @@ class ImgManagerWindow(QWidget):
         dlg.show()
 
     def _cli_uninstall_app(self):
+        mode = self._admin_gate()
+        if mode is None:
+            return
         text, ok = QInputDialog.getText(
             self, "Uninstall system app",
             "Package name (e.g. com.example.app):")
@@ -5555,15 +5558,16 @@ class ImgManagerWindow(QWidget):
             self._info("No package name entered \u2014 nothing to do.")
             return
         if not self._confirm(
-                f"Remove {pkg} from the system apps?\n"
+                f"Remove {pkg} from the {mode.upper()} system apps?\n"
+                f"Only the {mode} module image is touched.\n"
                 "The removal is scheduled for the next boot."):
             return
         if not self._confirm_live("uninstall system apps"):
             return
-        dlg = LogDialog(f"Uninstall system app \u2014 {pkg}", self)
+        dlg = LogDialog(f"Uninstall system app \u2014 {pkg} ({mode} module)", self)
         dlg.finished.connect(lambda _r: self._after_live_change())
         dlg.run_printing(self._twrp.uninstall_boltware, dict(
-            apk_name=pkg, initrd_path=self._real_path))
+            apk_name=pkg, initrd_path=self._real_path, mode=mode))
         dlg.show()
 
     def _cli_enable(self):
@@ -7376,7 +7380,14 @@ class WSATWRP:
             print("Recovery system: STOCK (no TWRP)")
             return
 
-        modes = ["admin", "user"] if mode is None else [mode]
+        # Default: USER image only. The ADMIN image is only ever touched
+        # when explicitly requested (--admin / the Admin tick) - never as a
+        # side effect of a plain run.
+        modes = ["user"] if mode is None else [mode]
+        if mode is None:
+            print("Module: USER image (default - use --admin for the admin image)")
+        else:
+            print(f"Module: {mode.upper()} image")
         pending = []
         for m in modes:
             select_image(m)
@@ -7863,8 +7874,9 @@ Examples:
   {CLI_NAME} --install-as-system-app app.apk              Install APK as system app
   {CLI_NAME} --install-as-system-app a.apk b.apk          Install multiple APKs
   {CLI_NAME} --list-of-boltware                           List system apps
-  {CLI_NAME} --uninstall-boltware com.wsa.webdav          Remove specific app
-  {CLI_NAME} --uninstall-boltware                          Remove all system apps
+  {CLI_NAME} --uninstall-boltware com.wsa.webdav          Remove specific app (USER image)
+  {CLI_NAME} --uninstall-boltware --admin                Remove from the ADMIN image
+  {CLI_NAME} --uninstall-boltware                          Remove all USER system apps
   {CLI_NAME} --cleanup-uninstall                           Clear uninstall.txt after the removal boot
   {CLI_NAME} --install-as-system-app app.apk              Install into USER module (default)
   {CLI_NAME} --install-as-system-app app.apk --admin      Install into ADMIN module (password)
@@ -7904,7 +7916,8 @@ Examples:
     parser.add_argument("--list-of-boltware", action="store_true",
                         help="List all system apps in both module images")
     parser.add_argument("--uninstall-boltware", nargs='?', const="", default=None,
-                        help="Remove app from the module images (no arg = remove entire image)")
+                        help="Remove app from the module image (no arg = whole image). "
+                             "USER image by default; add --admin for the ADMIN image")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--admin", action="store_true",
                             help="Target the ADMIN module image lsp_wsa-installer.img "

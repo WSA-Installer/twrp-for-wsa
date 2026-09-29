@@ -485,8 +485,9 @@ twrp.exe --admin --user                              # usage error, exit 2
 | `--admin` | `lsp_wsa-installer.img` | `wsa-installer` | ✅ required |
 | `--user` | `lsp_wsa-installer-user.img` | `wsa-installer-user` | ❌ none |
 
-The two flags are **mutually exclusive**. Default for install/update is
-`--user`. `--status` always reports both images.
+The two flags are **mutually exclusive**. Default for install/update **and**
+`--uninstall-boltware` is `--user` (a plain run never rewrites the ADMIN
+image). `--list-of-boltware` with no flag and `--status` report both images.
 
 Each image also carries its own `module.prop` `name` and a one-line
 `description` (from `IMAGE_SPECS["admin"|"user"]["description"]`) that states
@@ -519,18 +520,21 @@ means that image has never been created (not an error). Requires an injected
 
 ### --uninstall-boltware
 
-Schedule removal of system apps on the next boot.
+Schedule removal of system apps on the next boot. Targets the **USER image by
+default**; the ADMIN image is never touched without `--admin`.
 
 ```cmd
-twrp.exe --uninstall-boltware com.wsa.webdav   # one package
-twrp.exe --uninstall-boltware com.a com.b      # several
-twrp.exe --uninstall-boltware                  # no arg = whole image
-twrp.exe --uninstall-boltware --user           # USER image only
+twrp.exe --uninstall-boltware com.wsa.webdav   # one package (USER image)
+twrp.exe --uninstall-boltware com.a com.b      # several (USER image)
+twrp.exe --uninstall-boltware                  # no arg = whole USER image
+twrp.exe --uninstall-boltware --admin com.x    # ADMIN image (gate)
+twrp.exe --uninstall-boltware --user com.x     # USER image (explicit)
 ```
 
-Packages are collected from every selected image, de-duplicated, written to
+Packages are collected **within the selected module**, de-duplicated, written to
 `overlay.d/sbin/uninstall.txt` **once**, and the boot handler in
-`post-fs-data.sh` is (re)written. Nothing is removed until WSA reboots.
+`post-fs-data.sh` is (re)written. To clear an app from both modules, run twice
+(plain, then `--admin`). Nothing is removed until WSA reboots.
 After that boot has removed the app, clear the list with
 [`--cleanup-uninstall`](#--cleanup-uninstall) (next section).
 

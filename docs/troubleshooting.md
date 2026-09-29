@@ -144,7 +144,8 @@ Common issues and solutions for TWRP for WSA.
 ### Command asks for a password when I did not expect it
 
 Only these need `--admin`: `--install-as-system-app`, `--update-as-system-app`,
-`--uninstall-boltware` (when the app lives in ADMIN) and `--repaire-magisk-hook`
+`--uninstall-boltware --admin` (only when you deliberately target the ADMIN
+image; the plain command works on the USER image) and `--repaire-magisk-hook`
 against the ADMIN image. `--list-of-boltware`, `--status` and `--gui` never do.
 
 ---

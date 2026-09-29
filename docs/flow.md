@@ -255,13 +255,15 @@ first).
 
 **Uninstall** — `uninstall_boltware()`:
 
-1. Scan both images for the package
-2. If found only in USER → remove it directly
-3. If found in ADMIN → requires `--admin` password
-4. Append the package to `uninstall.txt` inside the image
-5. `patch_postfsdata_uninstall()` ensures `post-fs-data.sh` contains the
+1. Select the module: **USER image by default**, ADMIN image only with `--admin`
+   (a plain run never extracts or repacks the admin image)
+2. Remove the package from that image (no package argument = delete the whole
+   selected module image)
+3. Append the package to `uninstall.txt` inside the image
+4. `patch_postfsdata_uninstall()` ensures `post-fs-data.sh` contains the
    handler block delimited by `POSTFSDATA_MARKER`
-6. On next boot the hook removes the app from the running system
+5. On next boot the hook removes the app from the running system
+6. Afterwards run `--cleanup-uninstall` to drop the scheduled entry
 
 ---
 

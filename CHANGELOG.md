@@ -36,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Live-image guard: `_confirm_live()` warns about unapplied staged edits, `_after_live_change()` offers to reload the image after a CLI run modified it
 
 ### Changed
+- **`--uninstall-boltware` (and the *Uninstall system app* button) no longer touch the ADMIN image by default**: with no flag (GUI: Admin tick off) the run targets the **USER** image only and prints `Module: USER image (default - use --admin for the admin image)`; the button now goes through `_admin_gate()` like install/update, names the module in its confirm dialog and title, and passes an explicit `mode=`. Removing from both modules = run twice (plain, then `--admin`). `--list-of-boltware` / `--status` still report both modules (read-only)
 - `twrp.py` moved from `src/twrp.py` to the repository root
 - **`--enable-twrp` now checks that TWRP is actually installed** before flipping `recovery_flag`: `twrp_support=false` stops with `TWRP is NOT installed …` + `--install-twrp` hint, missing files stop with the `twrp_missing()` list + `--repair-twrp` hint; `recovery_flag` is never touched when the gate aborts
 - Uninstall hooks **remove the whole `overlay.d/` tree** (not just the script files) — the directory only exists for the hook, so `lsp_*.img` module images go with it

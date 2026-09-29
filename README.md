@@ -118,7 +118,7 @@ The official WSA installation does not include any recovery mode. If something g
 | Dual Module Images | ADMIN (`lsp_wsa-installer.img`) and USER (`lsp_wsa-installer-user.img`) coexist |
 | Password-Gated Admin | `--admin` needs a SHA-256 verified password (3 attempts, `WSA_ADMIN_PASSWORD` override) |
 | System-App Install/Update | `--install-as-system-app` / `--update-as-system-app` — default is the USER module |
-| Boltware Manager | `--list-of-boltware` / `--uninstall-boltware` across both images, de-duplicated |
+| Boltware Manager | `--list-of-boltware` lists both images (de-duplicated); `--uninstall-boltware` targets the USER image by default, `--admin` for ADMIN |
 | Magisk Hook | `--install-magisk-hook` / `--repaire-magisk-hook` with a `hook_issues()` audit |
 | Hook Removal | `--uninstall-magisk-hook` — `wsainit → /init` restored, `overlay.d/` tree removed |
 | Scheduled Uninstall | Removals written to `uninstall.txt` and applied on next boot; clear afterwards with `--cleanup-uninstall` |
