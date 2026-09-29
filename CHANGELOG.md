@@ -40,6 +40,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Uninstall hooks **remove the whole `overlay.d/` tree** (not just the script files) — the directory only exists for the hook, so `lsp_*.img` module images go with it
 - `--status` now reports both module images alongside the WSA/initrd state
 - Documentation rewritten to describe the full 23-option CLI surface
+
+### Fixed
+- **System-app permission XMLs are merged instead of replaced**: `privapp-permissions-wsa-installer[-user].xml` and `default-permissions-wsa-installer[-user].xml` now hold one `<privapp-permissions>` / `<exception>` block per package, rebuilt from `permissions/<pkg>.json` (`regenerate_permission_xmls()`) — installing a second system app no longer wipes the first app's package name; `--uninstall-boltware` drops only the removed package's block; `fixed=` is tracked per package instead of shared; legacy blocks without a profile are preserved; malformed files are rebuilt instead of crashing
 - Dispatcher build split from the 180-minute TWRP workflow into `build-dispatcher.yml`
 
 ### Removed

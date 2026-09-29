@@ -32,6 +32,43 @@ image's own `module.prop` `id` field — that is what separates them at runtime.
 
 The table is the literal content of `IMAGE_SPECS` in `twrp.py`.
 
+### Permission XMLs hold every package of the module
+
+Each image keeps **one** privileged-permission XML and **one**
+default-permissions XML — fixed file names (table above), so both are
+**merged: one block per package**, rebuilt from the per-package profiles in
+`permissions/<pkg>.json` by `InitrdManager.regenerate_permission_xmls()`:
+
+* installing a second app **adds its block** — an earlier package name is
+  never replaced: `<privapp-permissions package="com.wsa.webdav">` and
+  `<privapp-permissions package="com.termux">` coexist in
+  `privapp-permissions-wsa-installer.xml`
+* updating a package rewrites only its own block (profiles are the source of
+  truth, blocks are sorted by package name)
+* `--uninstall-boltware` drops the removed package's block
+  (`removed_pkgs=...`) and keeps every other package's
+* blocks in a legacy image that have **no** `permissions/*.json` profile are
+  preserved verbatim instead of being dropped
+* `fixed=` in the default-permissions XML is tracked **per package** (a
+  shared set used to bleed one app's `fixed="true"` into another's)
+* a file whose blocks all disappear is deleted
+
+Example — `privapp-permissions-wsa-installer-user.xml` after installing two
+user apps:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+    <privapp-permissions package="com.example.otherapp">
+        <permission name="android.permission.INTERACT_ACROSS_USERS"/>
+    </privapp-permissions>
+    <privapp-permissions package="wsa.playstore">
+        <permission name="android.permission.INSTALL_PACKAGES"/>
+        <permission name="android.permission.DELETE_PACKAGES"/>
+    </privapp-permissions>
+</permissions>
+```
+
 ---
 
 ## Mode resolution and the default

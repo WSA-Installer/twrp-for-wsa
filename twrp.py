@@ -29,6 +29,7 @@ import bz2
 import io
 import zipfile
 import tarfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal, QObject, QEventLoop
@@ -1837,33 +1838,165 @@ class InitrdManager:
         return result
 
     @staticmethod
-    def generate_privapp_xml(package_name, privapp_perms):
+    def generate_privapp_xml_multi(pkg_perms):
+        """One <permissions> file with a <privapp-permissions> block per package.
+
+        pkg_perms: {package_name: [perm, ...]}. Packages are sorted so the
+        output is stable; installing another app merges, never replaces."""
         lines = [
             '<?xml version="1.0" encoding="utf-8"?>',
             "<permissions>",
-            f'    <privapp-permissions package="{package_name}">',
         ]
-        for perm in privapp_perms:
-            lines.append(f'        <permission name="{perm}"/>')
-        lines.append("    </privapp-permissions>")
+        for pkg in sorted(pkg_perms):
+            lines.append(f'    <privapp-permissions package="{pkg}">')
+            for perm in pkg_perms[pkg]:
+                lines.append(f'        <permission name="{perm}"/>')
+            lines.append("    </privapp-permissions>")
         lines.append("</permissions>")
         return "\n".join(lines)
 
     @staticmethod
-    def generate_default_xml(package_name, runtime_perms, fixed_perms=None):
-        if fixed_perms is None:
-            fixed_perms = set()
+    def generate_default_xml_multi(pkg_data):
+        """One <exceptions> file with an <exception> block per package.
+
+        pkg_data: {package_name: (runtime_perms, fixed_perms)} - fixed is
+        tracked per package, not shared across packages."""
         lines = [
             "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>",
             "<exceptions>",
-            f'    <exception package="{package_name}">',
         ]
-        for perm in runtime_perms:
-            fixed = "true" if perm in fixed_perms else "false"
-            lines.append(f'        <permission name="{perm}" fixed="{fixed}"/>')
-        lines.append("    </exception>")
+        for pkg in sorted(pkg_data):
+            runtime_perms, fixed_perms = pkg_data[pkg]
+            lines.append(f'    <exception package="{pkg}">')
+            for perm in runtime_perms:
+                fixed = "true" if perm in fixed_perms else "false"
+                lines.append(f'        <permission name="{perm}" fixed="{fixed}"/>')
+            lines.append("    </exception>")
         lines.append("</exceptions>")
         return "\n".join(lines)
+
+    @staticmethod
+    def generate_privapp_xml(package_name, privapp_perms):
+        return InitrdManager.generate_privapp_xml_multi(
+            {package_name: list(privapp_perms)})
+
+    @staticmethod
+    def generate_default_xml(package_name, runtime_perms, fixed_perms=None):
+        return InitrdManager.generate_default_xml_multi(
+            {package_name: (list(runtime_perms),
+                            set() if fixed_perms is None else set(fixed_perms))})
+
+    @staticmethod
+    def _load_permission_profiles(extract_dir):
+        """{package: profile} from an extracted image's permissions/*.json."""
+        profiles = {}
+        perm_dir = os.path.join(extract_dir, "permissions")
+        if not os.path.isdir(perm_dir):
+            return profiles
+        for name in sorted(os.listdir(perm_dir)):
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(perm_dir, name), encoding="utf-8") as f:
+                    profiles[name[:-5]] = json.load(f)
+            except (OSError, ValueError) as exc:
+                _debug(f"  profile permissions/{name} unreadable: {exc}")
+        return profiles
+
+    @staticmethod
+    def _foreign_blocks(xml_path, decided_pkgs, tag):
+        """Top-level <tag package=...> elements we cannot derive ourselves.
+
+        A block whose package has no permissions/*.json AND was not explicitly
+        removed comes from a legacy image - it is preserved verbatim when the
+        file is rebuilt."""
+        kept = []
+        if not os.path.isfile(xml_path):
+            return kept
+        try:
+            root = ET.parse(xml_path).getroot()
+        except (ET.ParseError, OSError) as exc:
+            _debug(f"  {os.path.basename(xml_path)} unreadable ({exc}), "
+                   "rebuilding from profiles")
+            return kept
+        for el in root:
+            pkg = el.get("package")
+            if el.tag == tag and pkg and pkg not in decided_pkgs:
+                kept.append(el)
+        return kept
+
+    @staticmethod
+    def regenerate_permission_xmls(extract_dir, removed_pkgs=()):
+        """Rebuild BOTH merged permission XMLs of one extracted module image.
+
+        Every package with permissions/*.json gets its own block inside the
+        single fixed-filename file (installing app B keeps app A's block).
+        removed_pkgs: packages being uninstalled - their JSON is already gone,
+        so their blocks must be dropped instead of treated as legacy. Blocks of
+        unknown packages are preserved. Returns ({privapp packages},
+        {exception packages}) now represented in the files; a file whose blocks
+        all disappeared is deleted."""
+        profiles = InitrdManager._load_permission_profiles(extract_dir)
+        for gone in removed_pkgs:
+            profiles.pop(gone, None)
+        decided = set(profiles) | set(removed_pkgs)
+        priv_map = {}
+        def_map = {}
+        for pkg, profile in profiles.items():
+            priv = profile.get("privapp_perms") or []
+            runtime = profile.get("runtime_perms") or []
+            fixed = set(profile.get("fixed_runtime_perms") or [])
+            if priv:
+                priv_map[pkg] = list(priv)
+            if runtime:
+                def_map[pkg] = (list(runtime), fixed)
+
+        # --- privapp XML ---
+        priv_path = os.path.join(extract_dir, "system", "etc", "permissions",
+                                 LSP_PRIV_XML)
+        priv_kept = InitrdManager._foreign_blocks(
+            priv_path, decided, "privapp-permissions")
+        if priv_map or priv_kept:
+            os.makedirs(os.path.dirname(priv_path), exist_ok=True)
+            lines = ['<?xml version="1.0" encoding="utf-8"?>', "<permissions>"]
+            for el in priv_kept:
+                lines.append("    " + ET.tostring(el, encoding="unicode").rstrip())
+            lines.extend(InitrdManager.generate_privapp_xml_multi(priv_map)
+                         .splitlines()[2:-1])
+            lines.append("</permissions>")
+            with open(priv_path, "w", newline="") as f:
+                f.write("\n".join(lines))
+            n_priv = sum(len(v) for v in priv_map.values())
+            _debug(f"  Generated {LSP_PRIV_XML} "
+                   f"({len(priv_map)} packages, {n_priv} perms)")
+        elif os.path.isfile(priv_path):
+            os.remove(priv_path)
+            _debug(f"  Removed {LSP_PRIV_XML} (no packages left)")
+
+        # --- default-permissions XML ---
+        def_path = os.path.join(extract_dir, "system", "etc",
+                                "default-permissions", LSP_DEF_XML)
+        def_kept = InitrdManager._foreign_blocks(
+            def_path, decided, "exception")
+        if def_map or def_kept:
+            os.makedirs(os.path.dirname(def_path), exist_ok=True)
+            lines = ["<?xml version='1.0' encoding='utf-8' standalone='yes' ?>",
+                     "<exceptions>"]
+            for el in def_kept:
+                lines.append("    " + ET.tostring(el, encoding="unicode").rstrip())
+            lines.extend(InitrdManager.generate_default_xml_multi(def_map)
+                         .splitlines()[2:-1])
+            lines.append("</exceptions>")
+            with open(def_path, "w", newline="") as f:
+                f.write("\n".join(lines))
+            n_def = sum(len(v[0]) for v in def_map.values())
+            _debug(f"  Generated {LSP_DEF_XML} "
+                   f"({len(def_map)} packages, {n_def} perms)")
+        elif os.path.isfile(def_path):
+            os.remove(def_path)
+            _debug(f"  Removed {LSP_DEF_XML} (no packages left)")
+
+        return set(priv_map), set(def_map)
 
     def create_lsp_image(self, apk_paths, permission_profiles=None):
         _debug(f"create_lsp_image({len(apk_paths)} APKs)")
@@ -2003,10 +2136,6 @@ class InitrdManager:
                 f.write(service_sh)
             _debug("  Injected service.sh with logging")
 
-            all_privapp = []
-            all_runtime = []
-            all_fixed = set()
-
             for apk_path in apk_paths:
                 pkg = ApkAnalyzer.get_package_name(apk_path)
                 dest_dir = os.path.join(LSP_TEMP, "system", "priv-app", pkg)
@@ -2022,28 +2151,8 @@ class InitrdManager:
                         json.dump(profile, f, indent=2)
                     _debug(f"  Saved profile: permissions/{pkg}.json")
 
-                    privapp = profile.get("privapp_perms", [])
-                    runtime = profile.get("runtime_perms", [])
-                    fixed = set(profile.get("fixed_runtime_perms", []))
-                    all_privapp.extend(privapp)
-                    all_runtime.extend(runtime)
-                    all_fixed.update(fixed)
-
-            if all_privapp:
-                xml_dir = os.path.join(LSP_TEMP, "system", "etc", "permissions")
-                os.makedirs(xml_dir, exist_ok=True)
-                xml = self.generate_privapp_xml(pkg, all_privapp)
-                with open(os.path.join(xml_dir, LSP_PRIV_XML), "w", newline="") as f:
-                    f.write(xml)
-                _debug(f"  Generated {LSP_PRIV_XML} ({len(all_privapp)} perms)")
-
-            if all_runtime:
-                xml_dir = os.path.join(LSP_TEMP, "system", "etc", "default-permissions")
-                os.makedirs(xml_dir, exist_ok=True)
-                xml = self.generate_default_xml(pkg, all_runtime, all_fixed)
-                with open(os.path.join(xml_dir, LSP_DEF_XML), "w", newline="") as f:
-                    f.write(xml)
-                _debug(f"  Generated {LSP_DEF_XML} ({len(all_runtime)} perms)")
+            # one merged XML per type: a block for EVERY package above
+            InitrdManager.regenerate_permission_xmls(LSP_TEMP)
 
             image_path = os.path.join(INJECT_TEMP, LSP_IMAGE_NAME)
             result = subprocess.run(
@@ -6945,23 +7054,13 @@ class WSATWRP:
                             f.write(svc_content)
                         _debug(f"  Injected service.sh to EROFS")
 
-                    privapp_perms = profile.get("privapp_perms", [])
-                    runtime_perms = profile.get("runtime_perms", [])
-                    fixed_perms = set(profile.get("fixed_runtime_perms", []))
-                    if privapp_perms:
-                        etc_perms = os.path.join(extract_dir, "system", "etc", "permissions")
-                        os.makedirs(etc_perms, exist_ok=True)
-                        xml = InitrdManager.generate_privapp_xml(pkg, privapp_perms)
-                        with open(os.path.join(etc_perms, LSP_PRIV_XML), "w", newline="") as f:
-                            f.write(xml)
-                        _debug(f"  Generated {LSP_PRIV_XML} ({len(privapp_perms)} perms)")
-                    if runtime_perms:
-                        etc_def = os.path.join(extract_dir, "system", "etc", "default-permissions")
-                        os.makedirs(etc_def, exist_ok=True)
-                        xml = InitrdManager.generate_default_xml(pkg, runtime_perms, fixed_perms)
-                        with open(os.path.join(etc_def, LSP_DEF_XML), "w", newline="") as f:
-                            f.write(xml)
-                        _debug(f"  Generated {LSP_DEF_XML} ({len(runtime_perms)} perms)")
+                    # one merged XML per type: re-derive every package from
+                    # permissions/*.json so app A's block survives app B
+                    priv_pkgs, def_pkgs = InitrdManager.regenerate_permission_xmls(
+                        extract_dir)
+                    log(f"Permission XML: {LSP_PRIV_XML} "
+                        f"({len(priv_pkgs)} packages), "
+                        f"{LSP_DEF_XML} ({len(def_pkgs)} packages)")
 
                     _debug("  Repacking EROFS image")
                     initrd.repack_lsp_image()
@@ -7298,6 +7397,8 @@ class WSATWRP:
                     CpioUtils.delete_file(initrd.path, arcname)
                     print(f"Image empty, removed {LSP_IMAGE_NAME} entirely")
                 else:
+                    InitrdManager.regenerate_permission_xmls(
+                        extract_dir, removed_pkgs=[apk_name])
                     initrd.repack_lsp_image()
                     print(f"Removed {apk_name} from {LSP_IMAGE_NAME}")
 
