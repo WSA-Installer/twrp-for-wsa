@@ -43,6 +43,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Documentation rewritten to describe the full 24-option CLI surface
 
 ### Fixed
+- **Install/Update as system app no longer crashes** with `'PermissionManagerWindow' object has no attribute 'exec'` (introduced with the GUI button rows): `_collect_profiles()` now shows the frameless `QWidget` and spins a `QEventLoop` that `result_ready` quits — the same pattern the CLI path always used; the window is centred on screen
+- `PermissionManagerSignals.result_ready` changed from `Signal(dict)` to `Signal(object)`: `Signal(dict)` could not carry the **Cancel** result `None` (Shiboken conversion error, the slot received `{}` instead) — Cancel/close now correctly fall back to the default permission profile in **both** the GUI and CLI install paths
+- `PermissionManagerWindow.closeEvent` emits the cancelled result once when the window is closed without OK/Cancel (Alt+F4), so the caller's event loop can never hang
 - **System-app permission XMLs are merged instead of replaced**: `privapp-permissions-wsa-installer[-user].xml` and `default-permissions-wsa-installer[-user].xml` now hold one `<privapp-permissions>` / `<exception>` block per package, rebuilt from `permissions/<pkg>.json` (`regenerate_permission_xmls()`) — installing a second system app no longer wipes the first app's package name; `--uninstall-boltware` drops only the removed package's block; `fixed=` is tracked per package instead of shared; legacy blocks without a profile are preserved; malformed files are rebuilt instead of crashing
 - Dispatcher build split from the 180-minute TWRP workflow into `build-dispatcher.yml`
 

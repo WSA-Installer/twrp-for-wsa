@@ -2804,7 +2804,9 @@ class RecoveryWindow(QWidget):
 
 
 class PermissionManagerSignals(QObject):
-    result_ready = Signal(dict)
+    # object, not dict: the cancel/close path emits None and Signal(dict) would
+    # reject it (Shiboken conversion error), delivering {} instead of None.
+    result_ready = Signal(object)
 
 
 class PermissionManagerWindow(QWidget):
@@ -2825,6 +2827,7 @@ class PermissionManagerWindow(QWidget):
         self._package_name = package_name
         self._app_label = app_label
         self._signals = PermissionManagerSignals()
+        self._result_emitted = False
         self._drag_offset = None
         self._hover_btn = None
         self._chk_hide_uninstall = True
@@ -2888,12 +2891,22 @@ class PermissionManagerWindow(QWidget):
         self.update()
 
     def _on_ok(self):
+        self._result_emitted = True
         self._signals.result_ready.emit(self.get_result())
         self.close()
 
     def _on_cancel(self):
+        self._result_emitted = True
         self._signals.result_ready.emit(None)
         self.close()
+
+    def closeEvent(self, event):
+        # Alt+F4 / any close that is not OK/Cancel must not leave the caller's
+        # QEventLoop spinning forever - emit the cancelled result once.
+        if not self._result_emitted:
+            self._result_emitted = True
+            self._signals.result_ready.emit(None)
+        super().closeEvent(event)
 
     def get_result(self):
         return {
@@ -5341,7 +5354,12 @@ class ImgManagerWindow(QWidget):
         }
 
     def _collect_profiles(self, apk_paths):
-        """One PermissionManagerWindow per APK, exactly like the CLI."""
+        """One PermissionManagerWindow per APK, exactly like the CLI.
+
+        PermissionManagerWindow is a frameless QWidget - it has no exec();
+        show it and spin a QEventLoop that the result_ready signal quits
+        (same pattern as install_as_system_app).
+        """
         profiles = {}
         for apk_path in apk_paths:
             try:
@@ -5350,12 +5368,21 @@ class ImgManagerWindow(QWidget):
                 self._err(f"Cannot read {os.path.basename(apk_path)}:\n{exc}")
                 return None
             box = [None]
+            loop = QEventLoop()
             dlg = PermissionManagerWindow(
                 package_name=info["package"], app_label=info["label"],
                 parent=self)
             dlg._signals.result_ready.connect(
-                lambda r, b=box: b.__setitem__(0, r))
-            dlg.exec()
+                lambda r, b=box, l=loop: (b.__setitem__(0, r), l.quit()))
+            screen = QApplication.primaryScreen()
+            if screen is not None:
+                available = screen.availableGeometry()
+                dlg.move(
+                    available.center().x() - dlg.width() // 2,
+                    available.center().y() - dlg.height() // 2,
+                )
+            dlg.show()
+            loop.exec()
             profile = box[0]
             profiles[info["package"]] = profile if profile is not None \
                 else self._default_profile()
