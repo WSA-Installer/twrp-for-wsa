@@ -5,7 +5,7 @@
 
 Added after `4.1.0`. Code: `twrp.py` (`add_hook_infrastructure()`,
 `hook_issues()`, `repair_hook_infrastructure()`, `override_hook_infrastructure()`,
-`patch_postfsdata()`, `_flow_uninstall_magisk_hook()`). CLI:
+`build_boot_script()`, `patch_postfsdata()`, `_flow_uninstall_magisk_hook()`). CLI:
 `--install-magisk-hook`, `--repaire-magisk-hook` (alias `--repair-magisk-hook`),
 `--uninstall-magisk-hook`.
 
@@ -24,8 +24,29 @@ Added after `4.1.0`. Code: `twrp.py` (`add_hook_infrastructure()`,
 
 (`HOOK_DIRS`, `HOOK_MODES`, `HOOK_DIR_MODE` in `twrp.py`.)
 
-The script source is **`assets/fix.7z`** — extracted with the bundled
-`assets/7z.exe` into `%TEMP%\twrp_temp\Initrd-fix`.
+The hook **binaries** come from **`assets/fix.7z`** — extracted with the bundled
+`assets/7z.exe` into `%TEMP%\twrp_temp\Initrd-fix`. The script itself is not
+taken from `fix.7z`: every injection/repair rewrites `post-fs-data.sh` with the
+canonical **debug build** produced by `build_boot_script()` (see
+[Boot logging](#boot-logging)).
+
+---
+
+## Boot logging
+
+The boot script writes to three places:
+
+| Destination | Lifetime | How to read it |
+|---|---|---|
+| `$(dirname "$0")/post-fs-data.log` (tmpfs, `/sbin/post-fs-data.log`) | wiped next boot | visible in logcat for that boot |
+| `/data/adb/lsp-boot.log` | **persistent across boots** | `adb root; adb shell cat /data/adb/lsp-boot.log` |
+| `/storage/emulated/0/WSA Installer/post-fs-data.log` | copy of the above, refreshed after every boot | plain file access from Android (no root needed) |
+
+The background handler copies the persistent log to the user path as soon as
+Android reports `sys.boot_completed=1` — **no `--debug` flag needed** (the old
+`LOG_FOR_USER` gate was removed). The inner module script
+(`create_lsp_image()`) logs to the writable `/data/adb/module-post-fs-data.log`
+instead of the read-only image mountpoint.
 
 ---
 
@@ -34,9 +55,12 @@ The script source is **`assets/fix.7z`** — extracted with the bundled
 ### 1. Add — `add_hook_infrastructure()`
 
 * Fails if `assets/fix.7z` is missing.
-* **Skips if the hook is already installed** (`overlay.d/sbin/post-fs-data.sh`
-  present in the archive) and logs
-  `Magisk already installed, skipping hook infrastructure`.
+* **Skips the tree injection if the hook is already installed**
+  (`overlay.d/sbin/post-fs-data.sh` present in the archive) and logs
+  `Magisk already installed, skipping hook infrastructure`. Before skipping it
+  compares the script against `build_boot_script()` and, when the installed
+  copy is an older/lean version, rewrites it in place and logs
+  `Upgraded post-fs-data.sh to the debug version`.
 * Extracts `fix.7z` to `FIX_TEMP` and injects its tree into the image.
 
 ### 2. Audit — `hook_issues()`
@@ -46,7 +70,8 @@ Read-only. Returns a list of human-readable problems (empty = healthy):
 * missing directory entries (`overlay.d/`, `overlay.d/sbin/`)
 * directory entries out of order (a cpio archive requires parents before children)
 * wrong permission bits on `lspinit` / `magiskinit` / `wsainit` / `post-fs-data.sh`
-* missing or un-patched `post-fs-data.sh`
+* a `post-fs-data.sh` that is not the current debug version
+  (`… not the debug boot script (N bytes - old version, repair needed)`)
 
 ### 3. Repair / Override
 
@@ -55,10 +80,13 @@ Read-only. Returns a list of human-readable problems (empty = healthy):
 | `repair_hook_infrastructure()` | fixes exactly what `hook_issues()` reported; **safe to call repeatedly**, idempotent |
 | `override_hook_infrastructure()` | **force**: deletes `overlay.d/sbin/post-fs-data.sh` and `.backup` (unless they still have children), then rebuilds everything from `fix.7z`. Returns `True` only if the result passes `hook_issues()` |
 
-`patch_postfsdata(base)` normalises the script: strips the
-`# shellcheck disable=SC2174` line and appends the
-`# --- TWRP uninstall handler` block if `POSTFSDATA_MARKER` is not already there
-(so the patch is applied at most once).
+`patch_postfsdata(base)` upgrades **any** on-disk variant — the lean `fix.7z`
+base, an old handler-only build, or an earlier full script — to the canonical
+debug script from `build_boot_script()`. It is idempotent: feeding it the
+canonical bytes returns them unchanged, which is exactly the equality
+`hook_issues()` checks. The former `POSTFSDATA_UNINSTALL_BLOCK` /
+`SHELLCHECK_LINE` / `POSTFSDATA_MARKER` constants were folded into the
+builder.
 
 ### 4. Remove — `_flow_uninstall_magisk_hook()` (added after 4.1.0)
 
@@ -119,11 +147,13 @@ working on the live WSA recovery system or a standalone file.
 
 Removals are *scheduled*, not executed immediately:
 
-1. `WSATWRP.patch_postfsdata_uninstall()` writes the handler into
-   `overlay.d/sbin/post-fs-data.sh`. It appends a background block that waits for
-   Android to finish booting, then processes the list. With `LOG_FOR_USER` it also
-   copies the early log to
-   `/storage/emulated/0/WSA Installer/post-fs-data.log`.
+1. `WSATWRP.patch_postfsdata_uninstall()` writes the canonical debug script
+   (`build_boot_script()`) into `overlay.d/sbin/post-fs-data.sh`. It contains
+   a background block that waits for Android to finish booting, then copies
+   the persistent log to
+   `/storage/emulated/0/WSA Installer/post-fs-data.log` and processes the
+   list (this copy is **always** embedded — the old `LOG_FOR_USER` gate is
+   gone).
 2. `WSATWRP.inject_uninstall_txt(packages)` writes
    `overlay.d/sbin/uninstall.txt` — one package per line.
 
@@ -163,9 +193,11 @@ See [Boltware Manager](boltware-manager.md).
 | Symptom | Cause / fix |
 |---|---|
 | `fix.7z not found: …` | the asset is missing — restore `assets/fix.7z` |
-| `Magisk already installed, skipping hook infrastructure` | normal; use `--repaire-magisk-hook` to force a rebuild |
+| `Magisk already installed, skipping hook infrastructure` | normal; the script is still checked and upgraded if stale; use `--repaire-magisk-hook` to force a full rebuild |
 | `Failed to rebuild Magisk hook!` | `override_hook_infrastructure()` could not re-add the tree — check `fix.7z` integrity |
 | Hook present but apps not mounted | `hook_issues()` will name the wrong mode / missing dir; run `--repaire-magisk-hook` |
+| `… not the debug boot script (N bytes - old version, repair needed)` | an older (lean) script is installed — `--repaire-magisk-hook` rewrites it with full logging |
+| No boot log anywhere | old scripts logged to a read-only path and printed nothing; reinstalling (or `--repaire-magisk-hook`) writes the debug version — then check `/data/adb/lsp-boot.log` (`adb root`) or `/storage/emulated/0/WSA Installer/post-fs-data.log` |
 | Hook needs to go entirely | `--uninstall-magisk-hook` — restores `wsainit -> init`, removes the payload and the whole `overlay.d/` tree |
 | Uninstall "did nothing" | removal happens on the **next boot**; check the log in `/storage/emulated/0/WSA Installer/` |
 | Reinstalled app removed again on next boot | stale `uninstall.txt` still inside the image — run `twrp.py --cleanup-uninstall` after the removal boot |

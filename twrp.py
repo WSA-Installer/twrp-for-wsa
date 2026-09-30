@@ -95,7 +95,6 @@ ADB_HOST = "127.0.0.1"
 ADB_DEVICE = f"{ADB_HOST}:{ADB_PORT}"
 CREATE_NO_WINDOW = 0x08000000
 DEBUG = False
-LOG_FOR_USER = False
 
 # --- admin / user module images -------------------------------------------
 # Two independent LSP images live in the initrd. The boot hook
@@ -359,8 +358,6 @@ def unregister_img_handler():
 
 
 POSTFSDATA_ARCNAME = "overlay.d/sbin/post-fs-data.sh"
-POSTFSDATA_MARKER = b"# --- TWRP uninstall handler"
-SHELLCHECK_LINE = b"    # shellcheck disable=SC2174\n"
 HOOK_MODES = {
     "lspinit": 0o100750,
     "magiskinit": 0o100750,
@@ -383,37 +380,6 @@ TWRP_FLAG_RE = re.compile(
 # only when the spacing matches exactly, hence the fallback)
 RECOVERY_FLAG_RE = re.compile(
     br'("recovery_flag"\s*:\s*)("[^"]*"|true|false)', re.IGNORECASE)
-POSTFSDATA_UNINSTALL_BLOCK = (
-    b"\n# --- TWRP uninstall handler (background) ---\n"
-    b"(\n"
-    b"    while [ \"$(getprop sys.boot_completed)\" != \"1\" ]; do sleep 1; done\n"
-    b"    sleep 5\n"
-    b"    mkdir -p /storage/emulated/0/MT2\n"
-    b"    EARLY_LOG=\"$(dirname \"$0\")/post-fs-data.log\"\n"
-    b"    USER_LOG=\"/storage/emulated/0/MT2/uninstall.log\"\n"
-    b"    cp -f \"$EARLY_LOG\" \"$USER_LOG\" 2>/dev/null\n"
-    b"    log_uninstall() {\n"
-    b"        echo \"[$(date '+%Y-%m-%d %H:%M:%S')] $1\" >> \"$EARLY_LOG\"\n"
-    b"        echo \"[$(date '+%Y-%m-%d %H:%M:%S')] $1\" >> \"$USER_LOG\"\n"
-    b"    }\n"
-    b"    UNINSTALL_FILE=\"$(dirname \"$0\")/uninstall.txt\"\n"
-    b"    if [ -f \"$UNINSTALL_FILE\" ]; then\n"
-    b"        log_uninstall \"=== TWRP Uninstall start ===\"\n"
-    b"        while IFS= read -r PKG; do\n"
-    b"            [ -z \"$PKG\" ] && continue\n"
-    b"            log_uninstall \"UNINSTALL: $PKG\"\n"
-    b"            if pm uninstall \"$PKG\" 2>/dev/null; then\n"
-    b"                log_uninstall \"  UNINSTALLED: $PKG\"\n"
-    b"            else\n"
-    b"                log_uninstall \"  FAILED: $PKG\"\n"
-    b"            fi\n"
-    b"        done < \"$UNINSTALL_FILE\"\n"
-    b"        rm -f \"$UNINSTALL_FILE\"\n"
-    b"        log_uninstall \"=== TWRP Uninstall complete ===\"\n"
-    b"    fi\n"
-    b") &\n"
-    b"# --- end TWRP uninstall handler ---\n"
-)
 
 
 def guess_mode(arcname, data):
@@ -603,11 +569,131 @@ def build_tar_from_dir(src_dir, orig_modes=None):
     return buffer.getvalue()
 
 
+def build_boot_script():
+    """Canonical boot script for the injected Magisk hook.
+
+    Single source of truth: hook injection (patch_postfsdata) and the
+    uninstall flow (patch_postfsdata_uninstall) write exactly these bytes.
+
+    Log destinations:
+      * ``$(dirname "$0")/post-fs-data.log``  - tmpfs, wiped next boot
+      * ``/data/adb/lsp-boot.log``            - persistent (adb root)
+      * ``/storage/emulated/0/WSA Installer/post-fs-data.log``
+        - copied by the background handler once Android has booted,
+          no --debug flag needed
+    """
+    handler = (
+        "# --- TWRP uninstall handler (background) ---\n"
+        "(\n"
+        '    while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 1; done\n'
+        "    sleep 5\n"
+        '    EARLY_LOG="$(dirname "$0")/post-fs-data.log"\n'
+        '    PERSIST_LOG="/data/adb/lsp-boot.log"\n'
+        '    USER_LOG="/storage/emulated/0/WSA Installer/post-fs-data.log"\n'
+        '    printf "[%s] [Root] Android boot complete, copying log to user path\\n" "$(date \'+%Y-%m-%d %H:%M:%S\')" >> "$EARLY_LOG" 2>/dev/null\n'
+        '    printf "[%s] [Root] Android boot complete, copying log to user path\\n" "$(date \'+%Y-%m-%d %H:%M:%S\')" 2>/dev/null >> "$PERSIST_LOG"\n'
+        '    mkdir -p "/storage/emulated/0/WSA Installer" 2>/dev/null\n'
+        '    cp -f "$PERSIST_LOG" "$USER_LOG" 2>/dev/null\n'
+        '    log_uninstall() {\n'
+        '        _line="$(printf "[%s] [User] %s" "$(date \'+%Y-%m-%d %H:%M:%S\')" "$1")"\n'
+        '        printf "%s\\n" "$_line" >> "$EARLY_LOG" 2>/dev/null\n'
+        '        printf "%s\\n" "$_line" 2>/dev/null >> "$PERSIST_LOG"\n'
+        '        printf "%s\\n" "$_line" >> "$USER_LOG" 2>/dev/null\n'
+        "    }\n"
+        '    UNINSTALL_FILE="$(dirname "$0")/uninstall.txt"\n'
+        '    if [ -f "$UNINSTALL_FILE" ]; then\n'
+        '        log_uninstall "=== TWRP Uninstall start ==="\n'
+        "        while IFS= read -r PKG; do\n"
+        '            [ -z "$PKG" ] && continue\n'
+        '            log_uninstall "UNINSTALL: $PKG"\n'
+        '            if pm uninstall "$PKG" 2>/dev/null; then\n'
+        '                log_uninstall "  UNINSTALLED: $PKG"\n'
+        "            else\n"
+        '                log_uninstall "  FAILED: $PKG"\n'
+        "            fi\n"
+        '        done < "$UNINSTALL_FILE"\n'
+        '        rm -f "$UNINSTALL_FILE"\n'
+        '        log_uninstall "=== TWRP Uninstall complete ==="\n'
+        "    fi\n"
+        ") &\n"
+        "# --- end TWRP uninstall handler ---\n"
+    )
+    script = (
+        "#!/bin/sh\n"
+        'LOGFILE="$(dirname "$0")/post-fs-data.log"\n'
+        'PERSIST_LOG="/data/adb/lsp-boot.log"\n'
+        "log() {\n"
+        '    _line="$(printf "[%s] [Root] %s" "$(date \'+%Y-%m-%d %H:%M:%S\')" "$1")"\n'
+        '    printf "%s\\n" "$_line" >> "$LOGFILE"\n'
+        '    printf "%s\\n" "$_line" 2>/dev/null >> "$PERSIST_LOG"\n'
+        "}\n"
+        "if [ ! -d /data/adb ]; then\n"
+        "    mkdir -m 700 /data/adb\n"
+        '    chcon u:object_r:adb_data_file:s0 /data/adb\n'
+        '    log "Created /data/adb"\n'
+        "fi\n"
+        'log "=== post-fs-data.sh start ==="\n'
+        "MAGISKTMP=/sbin\n"
+        "[ -d /sbin ] || MAGISKTMP=/debug_ramdisk\n"
+        'log "MAGISKTMP=$MAGISKTMP"\n'
+        "MAGISKBIN=/data/adb/magisk\n"
+        "if [ ! -d $MAGISKBIN ]; then\n"
+        "    mkdir -p -m 755 $MAGISKBIN\n"
+        '    chcon u:object_r:system_file:s0 $MAGISKBIN\n'
+        '    log "Created $MAGISKBIN"\n'
+        "fi\n"
+        "ABI=$(getprop ro.product.cpu.abi)\n"
+        'log "ABI=$ABI"\n'
+        "for file in busybox magiskpolicy magiskboot magiskinit; do\n"
+        '    [ -x "$MAGISKBIN/$file" ] || {\n'
+        '        unzip -d $MAGISKBIN -oj $MAGISKTMP/stub.apk "lib/$ABI/lib$file.so"\n'
+        '        mv $MAGISKBIN/lib$file.so $MAGISKBIN/$file\n'
+        '        chmod 755 "$MAGISKBIN/$file"\n'
+        '        log "Extracted $file"\n'
+        "    }\n"
+        "done\n"
+        "for file in util_functions.sh boot_patch.sh; do\n"
+        '    [ -x "$MAGISKBIN/$file" ] || {\n'
+        '        unzip -d $MAGISKBIN -oj $MAGISKTMP/stub.apk "assets/$file"\n'
+        '        chmod 755 "$MAGISKBIN/$file"\n'
+        '        log "Extracted $file"\n'
+        "    }\n"
+        "done\n"
+        'for file in "$MAGISKTMP"/*; do\n'
+        '    if echo "$file" | grep -Eq "lsp_.+\\.img"; then\n'
+        '        foldername=$(basename "$file" .img)\n'
+        '        mkdir -p "$MAGISKTMP/$foldername"\n'
+        '        mount -t auto -o ro,loop "$file" "$MAGISKTMP/$foldername"\n'
+        '        log "Mounted $file -> $MAGISKTMP/$foldername"\n'
+        '        "$MAGISKTMP/$foldername/post-fs-data.sh" &\n'
+        "    fi\n"
+        "done\n"
+        "wait\n"
+        'log "All post-fs-data.sh scripts completed"\n'
+        'for file in "$MAGISKTMP"/*; do\n'
+        '    if echo "$file" | grep -Eq "lsp_.+\\.img"; then\n'
+        '        foldername=$(basename "$file" .img)\n'
+        '        umount "$MAGISKTMP/$foldername"\n'
+        '        log "Unmounted $MAGISKTMP/$foldername"\n'
+        '        rm -rf "${MAGISKTMP:?}/${foldername:?}"\n'
+        '        rm -f "$file"\n'
+        "    fi\n"
+        "done\n"
+        'log "Cleanup complete"\n'
+        'log "=== post-fs-data.sh end ==="\n'
+        "\n"
+        + handler
+    )
+    return script.encode("utf-8")
+
+
 def patch_postfsdata(base):
-    out = base.replace(SHELLCHECK_LINE, b"")
-    if POSTFSDATA_MARKER in out:
-        return out
-    return out + POSTFSDATA_UNINSTALL_BLOCK
+    """Upgrade any on-disk variant of the hook script (lean fix.7z base,
+    handler-only build, previous full script) to the canonical debug
+    script. Idempotent: patch_postfsdata(build_boot_script()) returns the
+    same bytes. `base` is the current content at the call site (kept for
+    call compatibility - it is intentionally not used)."""
+    return build_boot_script()
 
 
 DANGEROUS_PERMS = [
@@ -1667,6 +1753,13 @@ class InitrdManager:
             return False
         existing_entries = {name for name, *_ in CpioUtils.scan_entries(self.path)}
         if POSTFSDATA_ARCNAME in existing_entries:
+            current = CpioUtils.read_file(self.path, POSTFSDATA_ARCNAME)
+            fixed = patch_postfsdata(current)
+            if fixed != current:
+                CpioUtils.delete_file(self.path, POSTFSDATA_ARCNAME)
+                CpioUtils.add_file(self.path, POSTFSDATA_ARCNAME, fixed,
+                                   mode=guess_mode(POSTFSDATA_ARCNAME, fixed))
+                _log("Upgraded post-fs-data.sh to the debug version")
             _log("Magisk already installed, skipping hook infrastructure")
             return True
         if os.path.exists(FIX_TEMP):
@@ -1752,8 +1845,8 @@ class InitrdManager:
             if data[POSTFSDATA_ARCNAME] != patch_postfsdata(data[POSTFSDATA_ARCNAME]):
                 size = len(data[POSTFSDATA_ARCNAME])
                 issues.append(
-                    f"{POSTFSDATA_ARCNAME} missing uninstall handler "
-                    f"({size:,} bytes)")
+                    f"{POSTFSDATA_ARCNAME} not the debug boot script "
+                    f"({size:,} bytes - old version, repair needed)")
         return issues
 
     def repair_hook_infrastructure(self):
@@ -1775,7 +1868,7 @@ class InitrdManager:
                 _log(f"  {name}: mode {mode & 0o7777:o} -> {want & 0o7777:o}")
             if fixed != data:
                 _log(f"  {name}: {len(data):,} -> {len(fixed):,} bytes "
-                     f"(uninstall handler added)")
+                     f"(debug boot script written)")
 
         if CpioUtils.ensure_dir_entries(self.path, HOOK_DIRS, HOOK_DIR_MODE):
             _log("  " + " ".join(f"{d}/" for d in HOOK_DIRS) + ": directory entries inserted")
@@ -2018,7 +2111,7 @@ class InitrdManager:
                 f.write(module_prop)
             post_fs_data = (
                 "#!/bin/sh\n"
-                "LOGFILE=\"$(dirname \"$0\")/post-fs-data.log\"\n"
+                "LOGFILE=\"/data/adb/module-post-fs-data.log\"\n"
                 "log() { echo \"[$(date '+%Y-%m-%d %H:%M:%S')] $1\" | tee -a \"$LOGFILE\"; }\n"
                 "log \"=== post-fs-data.sh start ===\"\n"
                 'BASE="$(dirname "$0")"\n'
@@ -2258,125 +2351,14 @@ class InitrdManager:
         _log(f"Injected uninstall.txt ({len(packages)} packages)")
 
     def patch_postfsdata_uninstall(self):
+        """Write the canonical debug boot script (full [Root] logging +
+        background uninstall handler) into the initrd."""
         arcname = "overlay.d/sbin/post-fs-data.sh"
-
-        user_log_block = ""
-        if LOG_FOR_USER:
-            user_log_block = (
-                "    mkdir -p '/storage/emulated/0/WSA Installer'\n"
-                '    USER_LOG="/storage/emulated/0/WSA Installer/post-fs-data.log"\n'
-                '    cp -f "$EARLY_LOG" "$USER_LOG" 2>/dev/null\n'
-            )
-
-        root_transition = (
-            '    printf "[%s] [Root] Android boot complete, copying log to user path and starting uninstallation\\n" "$(date \'+%Y-%m-%d %H:%M:%S\')" >> "$EARLY_LOG"\n'
-        )
-        if LOG_FOR_USER:
-            root_transition += (
-                '    printf "[%s] [Root] Android boot complete, copying log to user path and starting uninstallation\\n" "$(date \'+%Y-%m-%d %H:%M:%S\')" >> "$USER_LOG"\n'
-            )
-
-        log_fn = (
-            '    log_uninstall() {\n'
-            '        printf "[%s] [User] %s\\n" "$(date \'+%Y-%m-%d %H:%M:%S\')" "$1" >> "$EARLY_LOG"\n'
-        )
-        if LOG_FOR_USER:
-            log_fn += '        printf "[%s] [User] %s\\n" "$(date \'+%Y-%m-%d %H:%M:%S\')" "$1" >> "$USER_LOG"\n'
-        log_fn += "    }\n"
-
-        uninstall_block = (
-            "# --- TWRP uninstall handler (background) ---\n"
-            "(\n"
-            '    while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 1; done\n'
-            "    sleep 5\n"
-            '    EARLY_LOG="$(dirname "$0")/post-fs-data.log"\n'
-            + user_log_block
-            + root_transition
-            + log_fn
-            + '    UNINSTALL_FILE="$(dirname "$0")/uninstall.txt"\n'
-            '    if [ -f "$UNINSTALL_FILE" ]; then\n'
-            '        log_uninstall "=== TWRP Uninstall start ==="\n'
-            "        while IFS= read -r PKG; do\n"
-            '            [ -z "$PKG" ] && continue\n'
-            '            log_uninstall "UNINSTALL: $PKG"\n'
-            '            if pm uninstall "$PKG" 2>/dev/null; then\n'
-            '                log_uninstall "  UNINSTALLED: $PKG"\n'
-            "            else\n"
-            '                log_uninstall "  FAILED: $PKG"\n'
-            "            fi\n"
-            "        done < \"$UNINSTALL_FILE\"\n"
-            "        rm -f \"$UNINSTALL_FILE\"\n"
-            '        log_uninstall "=== TWRP Uninstall complete ==="\n'
-            "    fi\n"
-            ") &\n"
-            "# --- end TWRP uninstall handler ---\n"
-        )
-
-        full_script = (
-            "#!/bin/sh\n"
-            'LOGFILE="$(dirname "$0")/post-fs-data.log"\n'
-            'log() { printf "[%s] [Root] %s\\n" "$(date \'+%Y-%m-%d %H:%M:%S\')" "$1" >> "$LOGFILE"; }\n'
-            'log "=== post-fs-data.sh start ==="\n'
-            "MAGISKTMP=/sbin\n"
-            "[ -d /sbin ] || MAGISKTMP=/debug_ramdisk\n"
-            'log "MAGISKTMP=$MAGISKTMP"\n'
-            "MAGISKBIN=/data/adb/magisk\n"
-            "if [ ! -d /data/adb ]; then\n"
-            "    mkdir -m 700 /data/adb\n"
-            '    chcon u:object_r:adb_data_file:s0 /data/adb\n'
-            '    log "Created /data/adb"\n'
-            "fi\n"
-            "if [ ! -d $MAGISKBIN ]; then\n"
-            "    mkdir -p -m 755 $MAGISKBIN\n"
-            '    chcon u:object_r:system_file:s0 $MAGISKBIN\n'
-            '    log "Created $MAGISKBIN"\n'
-            "fi\n"
-            "ABI=$(getprop ro.product.cpu.abi)\n"
-            'log "ABI=$ABI"\n'
-            "for file in busybox magiskpolicy magiskboot magiskinit; do\n"
-            '    [ -x "$MAGISKBIN/$file" ] || {\n'
-            '        unzip -d $MAGISKBIN -oj $MAGISKTMP/stub.apk "lib/$ABI/lib$file.so"\n'
-            '        mv $MAGISKBIN/lib$file.so $MAGISKBIN/$file\n'
-            '        chmod 755 "$MAGISKBIN/$file"\n'
-            '        log "Extracted $file"\n'
-            "    }\n"
-            "done\n"
-            "for file in util_functions.sh boot_patch.sh; do\n"
-            '    [ -x "$MAGISKBIN/$file" ] || {\n'
-            '        unzip -d $MAGISKBIN -oj $MAGISKTMP/stub.apk "assets/$file"\n'
-            '        chmod 755 "$MAGISKBIN/$file"\n'
-            '        log "Extracted $file"\n'
-            "    }\n"
-            "done\n"
-            'for file in "$MAGISKTMP"/*; do\n'
-            '    if echo "$file" | grep -Eq "lsp_.+\\.img"; then\n'
-            '        foldername=$(basename "$file" .img)\n'
-            '        mkdir -p "$MAGISKTMP/$foldername"\n'
-            '        mount -t auto -o ro,loop "$file" "$MAGISKTMP/$foldername"\n'
-            '        log "Mounted $file -> $MAGISKTMP/$foldername"\n'
-            '        "$MAGISKTMP/$foldername/post-fs-data.sh" &\n'
-            "    fi\n"
-            "done\n"
-            "wait\n"
-            'log "All post-fs-data.sh scripts completed"\n'
-            'for file in "$MAGISKTMP"/*; do\n'
-            '    if echo "$file" | grep -Eq "lsp_.+\\.img"; then\n'
-            '        foldername=$(basename "$file" .img)\n'
-            '        umount "$MAGISKTMP/$foldername"\n'
-            '        log "Unmounted $MAGISKTMP/$foldername"\n'
-            '        rm -rf "${MAGISKTMP:?}/${foldername:?}"\n'
-            '        rm -f "$file"\n'
-            "    fi\n"
-            "done\n"
-            'log "Cleanup complete"\n'
-            'log "=== post-fs-data.sh end ==="\n'
-            "\n"
-            + uninstall_block
-        )
-
+        script = build_boot_script()
         CpioUtils.delete_file(self.path, arcname)
-        CpioUtils.add_file(self.path, arcname, full_script.encode("utf-8"))
-        _log("Replaced post-fs-data.sh with full version + uninstall handler")
+        CpioUtils.add_file(self.path, arcname, script)
+        _log("Replaced post-fs-data.sh with full debug version "
+             f"+ uninstall handler ({len(script):,} bytes)")
         return True
 
     def find_existing_apks(self):
@@ -2615,6 +2597,39 @@ class ADBManager:
             return r.stdout or ""
         except Exception:
             return ""
+
+    def verify_boot_and_packages(self, packages, log=None, timeout=120,
+                                 poll=5):
+        """Wait until Android reports sys.boot_completed=1, then check
+        `pm list packages` for every package. Returns {pkg: bool}; an
+        empty dict means boot could not be confirmed (adb unavailable)."""
+        log = log or (lambda m: None)
+        deadline = time.time() + timeout
+        while True:
+            self._run(["connect", self.device])
+            out = self._run(["shell", "getprop", "sys.boot_completed"])
+            if out.strip().replace("\r", "") == "1":
+                break
+            if time.time() >= deadline:
+                log(f"Verification skipped: WSA boot not confirmed within "
+                    f"{timeout}s (is adb available?)")
+                return {}
+            time.sleep(poll)
+        log("WSA boot completed - verifying package visibility")
+        result = {}
+        for pkg in packages:
+            out = self._run(["shell", "pm", "list", "packages", pkg])
+            found = f"package:{pkg}" in out.replace("\r", "")
+            result[pkg] = found
+            if found:
+                log(f"Verified: {pkg} is installed and visible")
+            else:
+                log(f"NOT visible yet: {pkg}")
+                log("  The module is merged at the next post-fs-data - "
+                    "reboot WSA once more and re-check.")
+                log("  Boot diagnostics: adb root; "
+                    "cat /data/adb/lsp-boot.log")
+        return result
 
     def is_recovery(self):
         output = self._run(["devices"])
@@ -7141,7 +7156,9 @@ class WSATWRP:
         if is_wsa_img:
             log("Starting WSA...")
             WSADetector.ensure_running()
-            time.sleep(15)
+            log("Waiting for Android boot, then verifying the install...")
+            ADBManager().verify_boot_and_packages(
+                [pkg for _apk, pkg, _profile in apks_to_write], log)
 
         log("Installation complete!")
         print("\n  System app installation complete. Tool will close now.", flush=True)
@@ -7853,7 +7870,7 @@ def _parse_into(args_list):
 
 
 def main():
-    global DEBUG, LOG_FOR_USER
+    global DEBUG
     parser = argparse.ArgumentParser(
         description=f"{APP_NAME} v{APP_VERSION}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -7952,7 +7969,6 @@ Examples:
 
     if args.debug:
         DEBUG = True
-        LOG_FOR_USER = True
         _debug("Debug mode enabled")
 
     _debug(f"args: status={args.status}, path={args.path}, enable={args.enable_twrp}, "

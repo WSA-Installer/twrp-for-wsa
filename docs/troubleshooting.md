@@ -170,6 +170,27 @@ installed into it.
 **Solution:** restore `assets/aaptpp.exe` next to `twrp.py`, or run from the
 repository where it is bundled. Run with `--debug` for the full trace.
 
+### App installed but not visible in Android
+
+**Cause:** the install succeeded inside the module image, but the module is
+merged into the system at the **next** post-fs-data — on the very first boot
+the launcher may still miss it.
+
+**Solution:**
+
+1. Read the install log's verification block: after starting WSA the flow
+   waits for `sys.boot_completed=1` and runs `pm list packages`
+   (`Verified: …` or `NOT visible yet: …`)
+2. Reboot WSA once more (`adb reboot`), then re-check:
+   `adb shell pm list packages | findstr <pkg>`
+3. Diagnose the boot chain: `adb root`, then
+   `adb shell cat /data/adb/lsp-boot.log` — or open the plain file
+   `/storage/emulated/0/WSA Installer/post-fs-data.log` from Android
+4. No log lines at all → an older (lean) script is installed; re-run
+   `twrp.exe --repaire-magisk-hook` (or reinstall the app) to write the
+   debug version — see
+   [Boot logging](magisk-hook.md#boot-logging)
+
 ### Uninstall did nothing
 
 **Solution:**
@@ -198,8 +219,9 @@ twrp.exe --repaire-magisk-hook        (needs --admin for the ADMIN image)
 ```
 
 Typical findings: missing `overlay.d/sbin`, wrong mode on
-`lspinit`/`magiskinit`/`wsainit`, or `post-fs-data.sh` without the
-`# --- TWRP uninstall handler` marker.
+`lspinit`/`magiskinit`/`wsainit`, or a `post-fs-data.sh` that is not the
+current debug version (`… not the debug boot script (N bytes - old version,
+repair needed)`).
 
 ### Hook keeps coming back after a WSA update
 

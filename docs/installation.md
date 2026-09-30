@@ -221,6 +221,27 @@ The APK's package name is read with `assets/aaptpp.exe`, the old entry is
 replaced inside `lsp_wsa-installer[-user].img`, and a `*.img.bak-*` is written
 first. Details: [Admin & User Modules](admin-user-modules.md).
 
+After writing the image the flow starts WSA, waits for
+`sys.boot_completed=1` and runs `pm list packages` for every APK
+(`ADBManager.verify_boot_and_packages()`). The log then shows either
+
+```
+Verified: com.example.app is installed and visible
+```
+
+or, when the package is not visible yet (the module is merged at the *next*
+post-fs-data — the usual case on the very first boot):
+
+```
+NOT visible yet: com.example.app
+  The module is merged at the next post-fs-data - reboot WSA once more and re-check.
+  Boot diagnostics: adb root; cat /data/adb/lsp-boot.log
+```
+
+Boot logs themselves: `/data/adb/lsp-boot.log` (persistent, needs `adb root`)
+and `/storage/emulated/0/WSA Installer/post-fs-data.log` (plain file, copied
+after every boot). Details: [Magisk Hook — Boot logging](magisk-hook.md#boot-logging).
+
 ### See what is pre-installed
 
 ```cmd

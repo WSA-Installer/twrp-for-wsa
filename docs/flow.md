@@ -217,6 +217,12 @@ twrp.exe --update-as-system-app app.apk
    `--update-as-system-app` fails cleanly if the app is not installed yet
 7. **Pack + backup** — archive repacked, `.bak` sibling written first
 8. **Report** — image path, mode tag and new package list printed
+9. **Hook** — `add_hook_infrastructure()` makes sure the boot hook exists;
+   an older `post-fs-data.sh` is upgraded to the debug version
+10. **Boot + verify** — WSA is started and
+    `ADBManager.verify_boot_and_packages()` waits for `sys.boot_completed=1`,
+    then runs `pm list packages` per APK; a not-yet-visible package gets the
+    *reboot WSA once more* hint (the module merges at the next post-fs-data)
 
 ### Mermaid Diagram
 
@@ -260,8 +266,9 @@ first).
 2. Remove the package from that image (no package argument = delete the whole
    selected module image)
 3. Append the package to `uninstall.txt` inside the image
-4. `patch_postfsdata_uninstall()` ensures `post-fs-data.sh` contains the
-   handler block delimited by `POSTFSDATA_MARKER`
+4. `patch_postfsdata_uninstall()` (via `build_boot_script()`) rewrites
+   `overlay.d/sbin/post-fs-data.sh` with the canonical debug script and its
+   background uninstall handler
 5. On next boot the hook removes the app from the running system
 6. Afterwards run `--cleanup-uninstall` to drop the scheduled entry
 
@@ -274,11 +281,12 @@ twrp.exe --install-magisk-hook
 twrp.exe --repaire-magisk-hook
 ```
 
-1. `hook_issues()` audits the current image (files, modes, marker)
+1. `hook_issues()` audits the current image (files, modes, current debug script)
 2. `add_hook_infrastructure()` creates `overlay.d` + `overlay.d/sbin`
    with the modes from `HOOK_MODES`
-3. `patch_postfsdata()` injects/replaces the marked block in
-   `overlay.d/sbin/post-fs-data.sh`
+3. `patch_postfsdata()` / `build_boot_script()` write the canonical debug
+   script into `overlay.d/sbin/post-fs-data.sh` (an installed older version
+   is upgraded in place)
 4. `--repaire-magisk-hook` → `override_hook_infrastructure()` unpacks
    `assets/fix.7z` and force-rebuilds the whole hook
 5. Re-run `hook_issues()` → must return an empty list

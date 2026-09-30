@@ -363,13 +363,16 @@ Details: [admin-user-modules.md](admin-user-modules.md).
 | `HOOK_DIRS` | `overlay.d`, `overlay.d/sbin` (created when missing) |
 | `POSTFSDATA_ARCNAME` | `overlay.d/sbin/post-fs-data.sh` |
 | `HOOK_MODES` + `add_hook_infrastructure()` | seed `overlay.d/sbin` |
-| `hook_issues()` | audit: missing files, wrong mode, missing marker |
-| `repair_hook_infrastructure()` | force rebuild from `fix.7z` |
+| `hook_issues()` | audit: missing files, wrong mode, stale (non-debug) script |
+| `repair_hook_infrastructure()` | fix whatever the audit reported |
 | `override_hook_infrastructure()` | `--repaire-magisk-hook` entry point |
-| `patch_postfsdata()` / `inject_uninstall_txt()` | append/remove the `uninstall.txt` handler block |
+| `build_boot_script()` / `patch_postfsdata()` | write/upgrade the canonical debug boot script (logging + uninstall handler) |
+| `inject_uninstall_txt()` | append/remove the `uninstall.txt` package list |
 
-`POSTFSDATA_MARKER = b"# --- TWRP uninstall handler"` delimits the injected
-block, so it can be removed idempotently.
+`build_boot_script()` is the single source of truth for
+`overlay.d/sbin/post-fs-data.sh`: hook injection, repair/override and the
+uninstall flow all write exactly its bytes (idempotently —
+`hook_issues()` compares the installed copy against it).
 
 Details: [magisk-hook.md](magisk-hook.md).
 
