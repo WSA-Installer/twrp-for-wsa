@@ -18,6 +18,7 @@ Added after `4.1.0`. Code: `twrp.py` (`add_hook_infrastructure()`,
 | `overlay.d/` | `040750` | overlay root |
 | `overlay.d/sbin/` | `040750` | scripts root |
 | `overlay.d/sbin/post-fs-data.sh` | `0644` | early-boot entry point |
+| `overlay.d/sbin/wsa-playstore.sh` | `0755` | Play-Store system-app helper (background) |
 | `overlay.d/sbin/lspinit` | `0750` | LSP init |
 | `overlay.d/sbin/magiskinit` | `0750` | Magisk init (root builds) |
 | `overlay.d/sbin/wsainit` | `0777` | WSA init (root builds) |
@@ -47,6 +48,54 @@ Android reports `sys.boot_completed=1` — **no `--debug` flag needed** (the old
 `LOG_FOR_USER` gate was removed). The inner module script
 (`create_lsp_image()`) logs to the writable `/data/adb/module-post-fs-data.log`
 instead of the read-only image mountpoint.
+
+---
+
+## Play Store system-app helper (`wsa-playstore.sh`)
+
+A second script ships with the hook: `overlay.d/sbin/wsa-playstore.sh`
+(`WSA_PLAYSTORE_SH` in `twrp.py`, injected by `inject_wsa_playstore_sh()`).
+The canonical boot script ends with a launcher **below** the uninstall
+handler that starts it in the background on every boot:
+
+```sh
+WSA_PS="$(dirname "$0")/wsa-playstore.sh"
+if [ -f "$WSA_PS" ]; then
+    chmod 755 "$WSA_PS"
+    ( "$WSA_PS" ) &
+fi
+```
+
+The helper is the root half of the *Play Store system-app promotion*
+feature. The store app (`com.android.vending`, formerly `wsa.playstore`)
+installs apps as **normal user apps** and only records intent in its
+registry; the helper does everything privileged:
+
+1. waits for `sys.boot_completed=1`, then loops every ~10 s (PID-guarded
+   via `/data/adb/.wsa-playstore.pid`);
+2. touch-tests `/system` for writability (`mount -o remount,rw` fallback —
+   never `adb remount`); if not writable it only logs and retries;
+3. reads `/data/data/com.android.vending/files/info.json` (pure
+   `grep -oE`/`sed`, no jq) and processes every registered package:
+
+| State | Action |
+|---|---|
+| `true` | skip forever |
+| `"pending"` | `pm list packages -s` shows it → `true`; otherwise self-heal the copy/XML, stay `"pending"` |
+| `false` | already system → `true`; `pm path` finds the APKs → copy base+splits into `/system/priv-app/<pkg>/`, append both XML blocks → `"pending"`; `pm path` fails → stay `false`, log |
+
+4. permission XMLs (`privapp-permissions-wsa-playstore.xml`,
+   `default-permissions-wsa-playstore.xml`) are **created with a header if
+   missing**, appended before the closing tag with a `grep` dedupe per
+   package — app 2's block lands below app 1's. Content comes from the
+   embedded `PRIVILEGED_PERMS` / `DANGEROUS_PERMS`+`SPECIAL_PERMS` lists
+   (same default profile as the installer). There is **no `pm install`** —
+   the store already installed the app as a user app.
+
+The registry contract (states, atomic-write rule, prompt-before-install,
+"never touch `/system` or `/data/adb`") is documented for the store agent
+in `CHANGELOG.md`. Helper log lines are prefixed `[SysApp]` and go to the
+same three destinations as the boot script.
 
 ---
 

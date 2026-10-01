@@ -33,7 +33,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal, QObject, QEventLoop
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import (
+    QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QTextCursor,
+)
 from PySide6.QtWidgets import (
     QApplication, QWidget, QTreeWidget, QTreeWidgetItem, QMenu, QFileDialog,
     QInputDialog, QMessageBox, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
@@ -358,11 +360,13 @@ def unregister_img_handler():
 
 
 POSTFSDATA_ARCNAME = "overlay.d/sbin/post-fs-data.sh"
+PLAYSTORE_SH_ARCNAME = "overlay.d/sbin/wsa-playstore.sh"
 HOOK_MODES = {
     "lspinit": 0o100750,
     "magiskinit": 0o100750,
     "wsainit": 0o100777,
     POSTFSDATA_ARCNAME: 0o100644,
+    PLAYSTORE_SH_ARCNAME: 0o100755,
 }
 HOOK_DIRS = ["overlay.d", "overlay.d/sbin"]
 HOOK_DIR_MODE = 0o040750
@@ -618,6 +622,15 @@ def build_boot_script():
         ") &\n"
         "# --- end TWRP uninstall handler ---\n"
     )
+    launcher = (
+        "# --- wsa-playstore system-app helper (background) ---\n"
+        'WSA_PS="$(dirname "$0")/wsa-playstore.sh"\n'
+        'if [ -f "$WSA_PS" ]; then\n'
+        '    chmod 755 "$WSA_PS"\n'
+        '    ( "$WSA_PS" ) &\n'
+        "fi\n"
+        "# --- end wsa-playstore helper ---\n"
+    )
     script = (
         "#!/bin/sh\n"
         'LOGFILE="$(dirname "$0")/post-fs-data.log"\n'
@@ -683,6 +696,7 @@ def build_boot_script():
         'log "=== post-fs-data.sh end ==="\n'
         "\n"
         + handler
+        + launcher
     )
     return script.encode("utf-8")
 
@@ -954,6 +968,332 @@ GMS_PERMS = [
     "com.google.android.providers.gsf.permission.READ_GSERVICES",
     "com.android.vending.permission.C2D_MESSAGE",
 ]
+
+# --- Play-Store system-app helper ------------------------------------------
+# Standalone root helper injected at overlay.d/sbin/wsa-playstore.sh (next to
+# post-fs-data.sh) and started in the background by the boot-script launcher
+# (see build_boot_script()). The Play Store agent only writes the registry
+# below; EVERY /system change happens here, as root - the store app never
+# touches /system or /data/adb.
+#
+# Registry contract (mirrored in CHANGELOG.md for the store agent):
+#   /data/data/com.android.vending/files/info.json   (append-only)
+#   {"<pkg>": false, "<pkg2>": "pending", "<pkg3>": true}
+#     false   = store installed the app as a user app, promotion requested
+#     pending = APK + permission XMLs copied into /system, awaiting reboot
+#     true    = verified system app (pm list packages -s), done forever
+# Entries are never removed. The flag flip rewrites only the target key
+# (temp file, then replace - the existing app-owned inode is preserved).
+#
+# Permission blocks use the same default profile the installer uses when no
+# permission window is answered: sorted PRIVILEGED_PERMS for the privapp
+# whitelist, DANGEROUS_PERMS + SPECIAL_PERMS (fixed) for default-permissions.
+WSA_PLAYSTORE_SH = r"""#!/system/bin/sh
+# wsa-playstore.sh - promote packages registered by the Play Store agent
+# into /system/priv-app as system apps. Started in the background by the
+# Magisk boot hook; loops every 10 s until WSA shuts down. Pure sh (busybox
+# / toybox applets only): no adb, no pm install, no jq.
+
+REG="/data/data/com.android.vending/files/info.json"
+PRIV_APP_ROOT="/system/priv-app"
+PRIV_XML="/system/etc/permissions/privapp-permissions-wsa-playstore.xml"
+DEF_XML="/system/etc/default-permissions/default-permissions-wsa-playstore.xml"
+PIDFILE="/data/adb/.wsa-playstore.pid"
+EARLY_LOG="$(dirname "$0")/post-fs-data.log"
+PERSIST_LOG="/data/adb/lsp-boot.log"
+USER_LOG="/storage/emulated/0/WSA Installer/post-fs-data.log"
+
+PRIV_PERMS='
+<<PRIV_PERMS>>
+'
+
+RUNTIME_PERMS='
+<<RUNTIME_PERMS>>
+'
+
+log() {
+    _line="$(printf "[%s] [SysApp] %s" "$(date '+%Y-%m-%d %H:%M:%S')" "$1")"
+    printf "%s\n" "$_line" >> "$EARLY_LOG" 2>/dev/null
+    printf "%s\n" "$_line" 2>/dev/null >> "$PERSIST_LOG"
+    printf "%s\n" "$_line" >> "$USER_LOG" 2>/dev/null
+}
+
+re_escape() {
+    printf '%s' "$1" | sed 's/\./\\./g'
+}
+
+read_state() {
+    [ -f "$REG" ] || return 0
+    _re="$(re_escape "$1")"
+    _pat="\"${_re}\"[[:space:]]*:[[:space:]]*(true|false|\"[^\"]*\")"
+    grep -oE "$_pat" "$REG" 2>/dev/null | head -n 1 |
+        sed 's/^[^:]*:[[:space:]]*//'
+}
+
+set_state() {
+    _pkg="$1"
+    _st="$2"
+    _tmp="$REG.tmp.$$"
+    _entries=""
+    if [ -f "$REG" ]; then
+        _entries="$(grep -oE '"[^"]+"[[:space:]]*:[[:space:]]*(true|false|"[^"]*"|null|-?[0-9.]+)' "$REG" 2>/dev/null)"
+    fi
+    {
+        printf '{\n'
+        _first=""
+        _seen=""
+        while IFS= read -r _e; do
+            [ -n "$_e" ] || continue
+            _k="$(printf '%s\n' "$_e" | sed 's/^[[:space:]]*"\([^"]*\)".*$/\1/')"
+            if [ "$_k" = "$_pkg" ]; then
+                if [ -n "$_seen" ]; then
+                    continue
+                fi
+                _e="\"$_pkg\": $_st"
+                _seen=1
+            fi
+            if [ -n "$_first" ]; then
+                printf ',\n'
+            fi
+            printf '%s' "$_e"
+            _first=1
+        done <<EOF
+$_entries
+EOF
+        if [ -z "$_seen" ]; then
+            if [ -n "$_first" ]; then
+                printf ',\n'
+            fi
+            printf '"%s": %s' "$_pkg" "$_st"
+        fi
+        printf '\n}\n'
+    } > "$_tmp"
+    if [ -f "$REG" ]; then
+        if cat "$_tmp" > "$REG" 2>/dev/null; then
+            rm -f "$_tmp"
+            return 0
+        fi
+        log "SYSAPP: cannot rewrite $REG"
+        rm -f "$_tmp"
+        return 1
+    fi
+    mkdir -p "$(dirname "$REG")" 2>/dev/null
+    if ! mv -f "$_tmp" "$REG" 2>/dev/null; then
+        log "SYSAPP: cannot create $REG"
+        rm -f "$_tmp"
+        return 1
+    fi
+    _d="$(dirname "$REG")"
+    _uid="$(stat -c %u "$_d" 2>/dev/null)"
+    _gid="$(stat -c %g "$_d" 2>/dev/null)"
+    if [ -n "$_uid" ]; then
+        chown "$_uid:$_gid" "$REG" 2>/dev/null
+    fi
+    chmod 644 "$REG" 2>/dev/null
+    return 0
+}
+
+registry_pkgs() {
+    [ -f "$REG" ] || return 0
+    grep -oE '"[^"]+"[[:space:]]*:[[:space:]]*(true|false|"[^"]*"|null|-?[0-9.]+)' "$REG" 2>/dev/null |
+        sed 's/^[[:space:]]*"\([^"]*\)".*$/\1/' | sort -u
+}
+
+is_system_app() {
+    pm list packages -s 2>/dev/null | grep -qx "package:$1"
+}
+
+rw_ok() {
+    if touch /system/.wsa_ps_rw 2>/dev/null; then
+        rm -f /system/.wsa_ps_rw
+        return 0
+    fi
+    mount -o remount,rw /system 2>/dev/null || mount -o remount,rw / 2>/dev/null
+    if touch /system/.wsa_ps_rw 2>/dev/null; then
+        rm -f /system/.wsa_ps_rw
+        return 0
+    fi
+    return 1
+}
+
+ensure_priv_xml() {
+    _pkg="$1"
+    grep -q "privapp-permissions package=\"$_pkg\"" "$PRIV_XML" 2>/dev/null && return 0
+    mkdir -p "$(dirname "$PRIV_XML")" 2>/dev/null
+    if [ ! -f "$PRIV_XML" ]; then
+        printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+            '<permissions>' '</permissions>' > "$PRIV_XML" || return 1
+    elif ! grep -q '</permissions>' "$PRIV_XML" 2>/dev/null; then
+        printf '%s\n' '</permissions>' >> "$PRIV_XML"
+    fi
+    _blk="$PIDFILE.blk.$$"
+    printf '    <privapp-permissions package="%s">\n' "$_pkg" > "$_blk" || return 1
+    for _p in $PRIV_PERMS; do
+        printf '        <permission name="%s"/>\n' "$_p" >> "$_blk"
+    done
+    printf '    </privapp-permissions>\n' >> "$_blk"
+    {
+        sed '$d' "$PRIV_XML"
+        cat "$_blk"
+        printf '</permissions>\n'
+    } > "$_blk.2"
+    cat "$_blk.2" > "$PRIV_XML"
+    rm -f "$_blk" "$_blk.2"
+    chmod 644 "$PRIV_XML" 2>/dev/null
+    chcon u:object_r:system_file:s0 "$PRIV_XML" 2>/dev/null
+    log "SYSAPP: appended $_pkg block to ${PRIV_XML##*/}"
+    return 0
+}
+
+ensure_def_xml() {
+    _pkg="$1"
+    grep -q "exception package=\"$_pkg\"" "$DEF_XML" 2>/dev/null && return 0
+    mkdir -p "$(dirname "$DEF_XML")" 2>/dev/null
+    if [ ! -f "$DEF_XML" ]; then
+        printf '%s\n' "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>" \
+            '<exceptions>' '</exceptions>' > "$DEF_XML" || return 1
+    elif ! grep -q '</exceptions>' "$DEF_XML" 2>/dev/null; then
+        printf '%s\n' '</exceptions>' >> "$DEF_XML"
+    fi
+    _blk="$PIDFILE.blk.$$"
+    printf '    <exception package="%s">\n' "$_pkg" > "$_blk" || return 1
+    for _p in $RUNTIME_PERMS; do
+        printf '        <permission name="%s" fixed="true"/>\n' "$_p" >> "$_blk"
+    done
+    printf '    </exception>\n' >> "$_blk"
+    {
+        sed '$d' "$DEF_XML"
+        cat "$_blk"
+        printf '</exceptions>\n'
+    } > "$_blk.2"
+    cat "$_blk.2" > "$DEF_XML"
+    rm -f "$_blk" "$_blk.2"
+    chmod 644 "$DEF_XML" 2>/dev/null
+    chcon u:object_r:system_file:s0 "$DEF_XML" 2>/dev/null
+    log "SYSAPP: appended $_pkg block to ${DEF_XML##*/}"
+    return 0
+}
+
+promote() {
+    _pkg="$1"
+    _paths="$(pm path "$_pkg" 2>/dev/null | sed 's/^package://')"
+    if [ -z "$_paths" ]; then
+        log "SYSAPP: pm path $_pkg not found - staying as is"
+        return 1
+    fi
+    _dst="$PRIV_APP_ROOT/$_pkg"
+    _need=1
+    if [ -d "$_dst" ]; then
+        _need=0
+        for _apk in $_paths; do
+            if [ ! -f "$_dst/${_apk##*/}" ]; then
+                _need=1
+                break
+            fi
+            if ! cmp -s "$_apk" "$_dst/${_apk##*/}" 2>/dev/null; then
+                _need=1
+                break
+            fi
+        done
+    fi
+    if [ "$_need" -eq 1 ]; then
+        mkdir -p "$_dst" || { log "SYSAPP: mkdir $_dst failed"; return 1; }
+        for _apk in $_paths; do
+            if ! cp -f "$_apk" "$_dst/${_apk##*/}" 2>/dev/null; then
+                log "SYSAPP: copy failed $_apk - will retry"
+                return 1
+            fi
+        done
+        chmod 755 "$_dst" 2>/dev/null
+        chown 0:0 "$_dst" 2>/dev/null
+        chcon u:object_r:system_file:s0 "$_dst" 2>/dev/null
+        for _apk in $_paths; do
+            chmod 644 "$_dst/${_apk##*/}" 2>/dev/null
+            chown 0:0 "$_dst/${_apk##*/}" 2>/dev/null
+            chcon u:object_r:system_file:s0 "$_dst/${_apk##*/}" 2>/dev/null
+        done
+        log "SYSAPP: copied $_pkg to /system/priv-app"
+    fi
+    ensure_priv_xml "$_pkg" || return 1
+    ensure_def_xml "$_pkg" || return 1
+    return 0
+}
+
+handle_pkg() {
+    _pkg="$1"
+    _st="$(read_state "$_pkg")"
+    case "$_st" in
+        true)
+            return 0
+            ;;
+        '"pending"')
+            if is_system_app "$_pkg"; then
+                set_state "$_pkg" true
+                log "SYSAPP: $_pkg verified (pm list -s) -> true"
+                return 0
+            fi
+            if promote "$_pkg"; then
+                log "SYSAPP: $_pkg pending (reboot required)"
+            else
+                log "SYSAPP: $_pkg pending self-heal incomplete - will retry"
+            fi
+            ;;
+        false)
+            if is_system_app "$_pkg"; then
+                set_state "$_pkg" true
+                log "SYSAPP: $_pkg already a system app -> true"
+                return 0
+            fi
+            if promote "$_pkg"; then
+                set_state "$_pkg" '"pending"'
+                log "SYSAPP: $_pkg promoted -> pending (reboot required)"
+            fi
+            ;;
+        "")
+            log "SYSAPP: registry missing $_pkg - skipped"
+            ;;
+        *)
+            log "SYSAPP: $_pkg unknown state '$_st' - skipped"
+            ;;
+    esac
+    return 0
+}
+
+# --- single instance --------------------------------------------------------
+if [ -f "$PIDFILE" ]; then
+    _old="$(cat "$PIDFILE" 2>/dev/null)"
+    if [ -n "$_old" ] && [ "$_old" != "$$" ] && kill -0 "$_old" 2>/dev/null; then
+        exit 0
+    fi
+fi
+printf '%s\n' "$$" > "$PIDFILE" 2>/dev/null
+trap 'rm -f "$PIDFILE"' EXIT
+trap 'exit 0' INT TERM
+
+mkdir -p "/storage/emulated/0/WSA Installer" 2>/dev/null
+log "=== wsa-playstore helper start (pid $$) ==="
+
+# --- main loop: wait for boot, then promote every registered package -------
+while :; do
+    if [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]; then
+        if rw_ok; then
+            _pkgs="$(registry_pkgs)"
+            for _p in $_pkgs; do
+                handle_pkg "$_p"
+            done
+        else
+            log "SYSAPP: /system not writable - will retry"
+        fi
+    fi
+    sleep 10
+done
+"""
+WSA_PLAYSTORE_SH = (
+    WSA_PLAYSTORE_SH
+    .replace("<<PRIV_PERMS>>", "\n".join(sorted(PRIVILEGED_PERMS)))
+    .replace("<<RUNTIME_PERMS>>",
+             "\n".join(list(DANGEROUS_PERMS) + list(SPECIAL_PERMS)))
+)
 
 
 def _debug(msg):
@@ -1853,6 +2193,7 @@ class InitrdManager:
                 CpioUtils.add_file(self.path, POSTFSDATA_ARCNAME, fixed,
                                    mode=guess_mode(POSTFSDATA_ARCNAME, fixed))
                 _log("Upgraded post-fs-data.sh to the debug version")
+            self.inject_wsa_playstore_sh()
             _log("Magisk already installed, skipping hook infrastructure")
             return True
         if os.path.exists(FIX_TEMP):
@@ -1904,6 +2245,7 @@ class InitrdManager:
                 count += 1
 
             _log(f"Injected {count} files from fix.7z")
+            self.inject_wsa_playstore_sh()
             return True
         finally:
             shutil.rmtree(FIX_TEMP, ignore_errors=True)
@@ -1940,6 +2282,13 @@ class InitrdManager:
                 issues.append(
                     f"{POSTFSDATA_ARCNAME} not the debug boot script "
                     f"({size:,} bytes - old version, repair needed)")
+        if PLAYSTORE_SH_ARCNAME in data:
+            want_ps = WSA_PLAYSTORE_SH.encode("utf-8")
+            if data[PLAYSTORE_SH_ARCNAME] != want_ps:
+                size = len(data[PLAYSTORE_SH_ARCNAME])
+                issues.append(
+                    f"{PLAYSTORE_SH_ARCNAME} out of date "
+                    f"({size:,} bytes vs {len(want_ps):,} - repair needed)")
         return issues
 
     def repair_hook_infrastructure(self):
@@ -1962,6 +2311,9 @@ class InitrdManager:
             if fixed != data:
                 _log(f"  {name}: {len(data):,} -> {len(fixed):,} bytes "
                      f"(debug boot script written)")
+
+        if self.inject_wsa_playstore_sh():
+            _log(f"  {PLAYSTORE_SH_ARCNAME}: helper injected/updated")
 
         if CpioUtils.ensure_dir_entries(self.path, HOOK_DIRS, HOOK_DIR_MODE):
             _log("  " + " ".join(f"{d}/" for d in HOOK_DIRS) + ": directory entries inserted")
@@ -2452,6 +2804,25 @@ class InitrdManager:
         CpioUtils.add_file(self.path, arcname, script)
         _log("Replaced post-fs-data.sh with full debug version "
              f"+ uninstall handler ({len(script):,} bytes)")
+        return True
+
+    def inject_wsa_playstore_sh(self):
+        """Write overlay.d/sbin/wsa-playstore.sh (Play-Store system-app
+        helper) into the initrd. Idempotent: identical bytes are left
+        untouched (returns False), an outdated copy is replaced. The helper
+        is launched by the boot script's wsa-playstore launcher block."""
+        data = WSA_PLAYSTORE_SH.encode("utf-8")
+        if CpioUtils.has_file(self.path, PLAYSTORE_SH_ARCNAME):
+            try:
+                current = CpioUtils.read_file(self.path, PLAYSTORE_SH_ARCNAME)
+            except Exception:
+                current = None
+            if current == data:
+                return False
+            CpioUtils.delete_file(self.path, PLAYSTORE_SH_ARCNAME)
+        CpioUtils.add_file(self.path, PLAYSTORE_SH_ARCNAME, data,
+                           mode=guess_mode(PLAYSTORE_SH_ARCNAME, data))
+        _log(f"Injected wsa-playstore.sh ({len(data):,} bytes)")
         return True
 
     def find_existing_apks(self):
@@ -4504,6 +4875,13 @@ class LogDialog(QDialog):
         self.resize(780, 470)
         self.setMinimumSize(520, 320)
         self._finished = False
+        # Consecutive-duplicate collapse: a runaway line no longer floods
+        # the transcript - repeats rewrite the last line with a live xN
+        # counter, and the terminal echo only re-prints at x10/x100/...
+        self._dup_msg = None
+        self._dup_count = 0
+        self._echo_msg = None
+        self._echo_count = 0
         # the real terminal, captured before anything redirects stdout
         self._real_out = sys.__stdout__
         self._signals = LogSignals()
@@ -4555,12 +4933,28 @@ class LogDialog(QDialog):
     # ------------------------------------------------------- worker-facing API
 
     def log(self, msg):
-        """The `log` callable handed to every _flow_* (also hits the terminal)."""
+        """The `log` callable handed to every _flow_* (also hits the terminal).
+
+        Consecutive identical messages are echoed to the terminal only on
+        the first occurrence and at x10 / x100 / x1000 / x10000, so a
+        repeating line cannot flood the console; the dialog gets every
+        message and collapses duplicates itself (see _append)."""
         text = str(msg)
-        try:
-            print(f"  {text}", file=self._real_out, flush=True)
-        except Exception:
-            pass
+        if text == self._echo_msg and text:
+            self._echo_count += 1
+            if self._echo_count in (10, 100, 1000, 10000):
+                try:
+                    print(f"  {text}  (x{self._echo_count})",
+                          file=self._real_out, flush=True)
+                except Exception:
+                    pass
+        else:
+            self._echo_msg = text
+            self._echo_count = 1
+            try:
+                print(f"  {text}", file=self._real_out, flush=True)
+            except Exception:
+                pass
         self.update_log(text)
 
     def update_log(self, msg):
@@ -4578,15 +4972,38 @@ class LogDialog(QDialog):
     # ------------------------------------------------------------------ slots
 
     def _append(self, msg):
+        text = str(msg) if msg is not None else ""
+        text = text.rstrip()
+        stripped = text.lstrip(" ")
+        if len(text) - len(stripped) > 4:
+            # runaway leading whitespace (log-flood artifact) -> max 4 spaces
+            text = "    " + stripped
         stamp = time.strftime("%H:%M:%S")
-        self._text.appendPlainText(f"[{stamp}] {msg}" if msg else "")
+        if text and text == self._dup_msg:
+            self._dup_count += 1
+            self._replace_last_block(
+                f"[{stamp}] {text}  \u00d7{self._dup_count}")
+        else:
+            self._dup_msg = text
+            self._dup_count = 1
+            self._text.appendPlainText(f"[{stamp}] {text}" if text else "")
         bar = self._text.verticalScrollBar()
         bar.setValue(bar.maximum())
+
+    def _replace_last_block(self, line):
+        """Overwrite the transcript's last line in place (duplicate counter
+        updates). Keeps one block per message instead of one per repeat."""
+        cursor = QTextCursor(self._text.document())
+        cursor.movePosition(QTextCursor.End)
+        cursor.movePosition(QTextCursor.StartOfBlock, QTextCursor.KeepAnchor)
+        cursor.insertText(line)
 
     def _finish(self):
         if self._finished:
             return
         self._finished = True
+        self._dup_msg = None
+        self._dup_count = 0
         self._text.appendPlainText("")
         self._text.appendPlainText(
             f"[{time.strftime('%H:%M:%S')}] finished \u2014 you can copy or "
