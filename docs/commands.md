@@ -424,13 +424,18 @@ non-stock image.
 
 ```cmd
 twrp.exe --uninstall-boltware [PACKAGE…] [--admin | --user]
+twrp.exe --uninstall-boltware                  # interactive picker
+twrp.exe --uninstall-boltware all              # whole USER module image
 ```
 
-No package argument = remove the whole **USER** module image. Packages are
-merged and de-duplicated **within the selected module** — USER by default,
-`--admin` switches to the ADMIN image (a plain run never touches it; to clear
-both modules, run twice) — written to `overlay.d/sbin/uninstall.txt`
-once, and removed **on the next boot**. After that boot, clear the list with
+No package argument opens the **interactive picker** (numbered list →
+numbers / package name / `all` / `q`); `all` removes the whole **USER**
+module image directly. Packages are merged and de-duplicated **within the
+selected module** — USER by default, `--admin` switches to the ADMIN image
+(a plain run never touches it; to clear both modules, run twice) — written to
+`overlay.d/sbin/uninstall.txt`, removed **on the next boot** and then
+**verified over adb** (`pm list packages -s`): on success WSA is stopped and
+`uninstall.txt` is deleted automatically. Fallback / external `--path`:
 [`--cleanup-uninstall`](#--cleanup-uninstall).
 Full guide: [Boltware Manager](boltware-manager.md).
 

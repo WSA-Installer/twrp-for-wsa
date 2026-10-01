@@ -37,11 +37,18 @@ Behaviour:
 
 ```bash
 twrp.py --uninstall-boltware com.wsa.webdav      # one package (USER image - the default)
-twrp.py --uninstall-boltware                     # no argument = whole USER image
-twrp.py --uninstall-boltware com.a com.b --user  # several, USER image (explicit)
-twrp.py --uninstall-boltware --admin com.x       # one package, ADMIN image (gate)
-twrp.py --uninstall-boltware --admin             # whole ADMIN image (gate)
+twrp.py --uninstall-boltware com.a com.b          # several packages at once
+twrp.py --uninstall-boltware                      # interactive picker (numbers/name/all/q)
+twrp.py --uninstall-boltware all                  # every USER system app (whole image)
+twrp.py --uninstall-boltware --admin com.x        # one package, ADMIN image (gate)
+twrp.py --uninstall-boltware --admin              # picker over the ADMIN image (gate)
 ```
+
+The **interactive picker** (bare flag) prints the packages of the selected
+module image numbered, then accepts: numbers (`1,3`), a package name, `all`
+(= whole image) or `q` (cancel). The GUI **Uninstall system app** button
+shows the same packages as a checkbox list with *Select all* and a manual
+entry line — any combination can be selected in one run.
 
 ### What happens
 
@@ -50,13 +57,18 @@ modes = ["user"] if mode is None else [mode]     # default: USER image only
 print("Module: USER image (default - use --admin for the admin image)")
 for m in modes:
     select_image(m)
+    # apk_name: None (whole image) | "pkg" | ["pkg1", "pkg2", ...]
     pending.extend(self._uninstall_boltware_image(initrd, apk_name))
 pending = list(dict.fromkeys(pending))        # de-duplicate, keep order
 if pending:
     initrd.patch_postfsdata_uninstall()       # write the boot handler
     initrd.inject_uninstall_txt(pending)      # write uninstall.txt
     print(f"Uninstall scheduled for {len(pending)} package(s) on next boot")
-    # + IMPORTANT note: run --cleanup-uninstall after the removal boot
+    # live WSA image only:
+    #   start WSA -> wait for boot -> poll `pm list packages -s` until no
+    #   selected package is still a SYSTEM app -> stop WSA -> auto-delete
+    #   uninstall.txt ("No manual cleanup needed")
+    # external --path / not verified -> the --cleanup-uninstall note below
 ```
 
 Key points:
@@ -66,16 +78,22 @@ Key points:
   the ADMIN image; to remove an app from both modules, run twice (plain, then
   `--admin`). `--list-of-boltware` / `--status` still report both modules.
 * `uninstall.txt` is injected **once**, with that module's list.
-* Nothing is executed immediately: the handler added to
-  `overlay.d/sbin/post-fs-data.sh` runs it on the next boot
+* Nothing executes immediately: the handler added to
+  `overlay.d/sbin/post-fs-data.sh` runs the list on the next boot
   (see [Magisk Hook](magisk-hook.md)).
-* `uninstall.txt` lives **inside the image** (RAMdisk) — the handler deletes
-  only its runtime copy, so the archive entry re-runs the same list on every
-  later boot. **After the removal boot, clear it** with
-  `twrp.py --cleanup-uninstall` (GUI: **Uninstall temp cleanup**), otherwise a
-  later reinstall is uninstalled again on the next boot.
-* `apk_name` omitted → `_uninstall_boltware_image(initrd, None)` removes the
-  entire module image (`overlay.d/sbin/lsp_wsa-installer[-user].img`).
+* **Automatic verification (live WSA image):** after the image is patched,
+  `_uninstall_auto_verify()` starts WSA, waits for `sys.boot_completed=1`,
+  then polls `adb shell pm list packages -s <pkg>` until no selected package
+  is still a **system** app (a package reinstalled afterwards as a plain
+  user app does *not* block success). On success it stops WSA and deletes
+  `overlay.d/sbin/uninstall.txt` itself — **no manual cleanup needed**.
+* **Manual fallback:** for an external `--path` image, when WSA cannot be
+  started or the timeout (120 s) passes, `uninstall.txt` is kept for safety
+  and the `--cleanup-uninstall` note is printed — run it after the removal
+  boot, otherwise a later reinstall is uninstalled again on the next boot.
+* `apk_name` omitted (or `all` in the picker) →
+  `_uninstall_boltware_image(initrd, None)` removes the entire module image
+  (`overlay.d/sbin/lsp_wsa-installer[-user].img`).
 
 ---
 
@@ -85,10 +103,9 @@ Key points:
 twrp.py --status                                # WSA info + both modules
 twrp.py --list-of-boltware                      # what is installed where
 twrp.py --uninstall-boltware com.example.old    # schedule removal (USER image)
-twrp.py --list-of-boltware                      # image still listed until reboot
-# ... reboot WSA ...
-twrp.py --list-of-boltware                      # now gone
-twrp.py --cleanup-uninstall                     # clear the pending list (do this!)
+# ... WSA starts, the removal is verified over adb, WSA stops again,
+#     uninstall.txt is deleted automatically ...
+twrp.py --list-of-boltware                      # gone after the removal boot
 ```
 
 ---
@@ -103,6 +120,9 @@ twrp.py --cleanup-uninstall                     # clear the pending list (do thi
 | Still listed after uninstall | expected — removal happens on the **next boot** |
 | App still present in the other module | one run targets one module only — repeat for the other module (`--admin`, or plain for USER); also expect removal only after the **next boot** |
 | `Uninstall scheduled for 0 package(s)` | the package name did not match any entry; check `--list-of-boltware` for the exact id |
-| Reinstalled app disappears again on next boot | stale `uninstall.txt` re-ran — run `twrp.py --cleanup-uninstall` (GUI: **Uninstall temp cleanup**) after the removal boot |
+| Picker prints `No packages in this module image` | the selected module has no system apps — type the package name manually (GUI: manual entry line) |
+| `Verification skipped: WSA boot not confirmed` | adb/WSA unavailable — `uninstall.txt` kept; run `--cleanup-uninstall` after the removal boot |
+| `Not verified within the timeout` | the boot handler did not remove the package in 120 s — `uninstall.txt` kept for safety; reboot and re-check, then `--cleanup-uninstall` |
+| Reinstalled app disappears again on next boot | stale `uninstall.txt` re-ran — run `twrp.py --cleanup-uninstall` (GUI: **Uninstall temp cleanup**) after the removal boot (only possible when the automatic cleanup was skipped) |
 
 See also: [Admin & User Modules](admin-user-modules.md) · [Magisk Hook](magisk-hook.md) · [Commands](commands.md)

@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QTreeWidget, QTreeWidgetItem, QMenu, QFileDialog,
     QInputDialog, QMessageBox, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
     QHeaderView, QAbstractItemView, QSizeGrip, QDialog, QPlainTextEdit,
-    QCheckBox, QLineEdit,
+    QCheckBox, QLineEdit, QListWidget, QListWidgetItem,
 )
 
 
@@ -703,12 +703,13 @@ DANGEROUS_PERMS = [
     "android.permission.GET_ACCOUNTS",
     "android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION",
     "android.permission.ACCESS_BACKGROUND_LOCATION", "android.permission.ACCESS_MEDIA_LOCATION",
+    "android.permission.ACCESS_LOCAL_NETWORK",
     "android.permission.RECORD_AUDIO",
     "android.permission.READ_PHONE_STATE", "android.permission.READ_PHONE_NUMBERS",
     "android.permission.CALL_PHONE", "android.permission.ANSWER_PHONE_CALLS",
     "android.permission.PROCESS_OUTGOING_CALLS", "android.permission.ACCEPT_HANDOVER",
     "android.permission.READ_CALL_LOG", "android.permission.WRITE_CALL_LOG",
-    "android.permission.ADD_VOICEMAIL", "android.permission.USE_SIP",
+    "com.android.voicemail.permission.ADD_VOICEMAIL", "android.permission.USE_SIP",
     "android.permission.BODY_SENSORS", "android.permission.BODY_SENSORS_BACKGROUND",
     "android.permission.ACTIVITY_RECOGNITION",
     "android.permission.SEND_SMS", "android.permission.RECEIVE_SMS",
@@ -720,10 +721,12 @@ DANGEROUS_PERMS = [
     "android.permission.BLUETOOTH_SCAN", "android.permission.BLUETOOTH_ADVERTISE",
     "android.permission.BLUETOOTH_CONNECT",
     "android.permission.NEARBY_WIFI_DEVICES", "android.permission.UWB_RANGING",
+    "android.permission.RANGING",
     "android.permission.POST_NOTIFICATIONS",
 ]
 
 SPECIAL_PERMS = [
+    "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
     "android.permission.SYSTEM_ALERT_WINDOW",
     "android.permission.WRITE_SETTINGS",
     "android.permission.REQUEST_INSTALL_PACKAGES",
@@ -778,6 +781,22 @@ PRIVILEGED_PERMS = {
     "android.permission.MOUNT_UNMOUNT_FILESYSTEMS",
     "android.permission.ACCESS_FM_RADIO", "android.permission.BROADCAST_PHONE_INTENT",
     "android.permission.PERFORM_SMS_AUTH",
+    "android.permission.BATTERY_STATS", "android.permission.BIND_CALL_REDIRECTION_SERVICE",
+    "android.permission.BIND_CARRIER_SERVICES", "android.permission.BIND_INCALL_SERVICE",
+    "android.permission.BIND_REMOTEVIEWS", "android.permission.BIND_SCREENING_SERVICE",
+    "android.permission.BIND_TELECOM_CONNECTION_SERVICE",
+    "android.permission.BIND_TV_AD_SERVICE", "android.permission.BIND_TV_INPUT",
+    "android.permission.BIND_TV_INTERACTIVE_APP",
+    "android.permission.BIND_VISUAL_VOICEMAIL_SERVICE",
+    "android.permission.BIND_WALLPAPER", "android.permission.CHANGE_CONFIGURATION",
+    "android.permission.CLEAR_APP_CACHE", "android.permission.DELETE_CACHE_FILES",
+    "android.permission.GET_ACCOUNTS_PRIVILEGED", "android.permission.GLOBAL_SEARCH",
+    "android.permission.PROVIDE_PRIVATE_COMPUTE_SERVICES",
+    "android.permission.PROVIDE_REMOTE_CREDENTIALS",
+    "android.permission.READ_HOME_TIME_ZONE",
+    "android.permission.SUBSCRIBE_TO_KEYGUARD_LOCKED_STATE",
+    "com.android.voicemail.permission.READ_VOICEMAIL",
+    "com.android.voicemail.permission.WRITE_VOICEMAIL",
 }
 
 NORMAL_PERMS = [
@@ -804,7 +823,7 @@ NORMAL_PERMS = [
     "android.permission.NFC", "android.permission.NFC_TRANSACTION_EVENT",
     "android.permission.NFC_HOST_CARD_EMULATION", "android.permission.ACCESS_BLUETOOTH_SHARE",
     "android.permission.SUBSCRIBE_TO_KEYGUARD_LOCKED", "android.permission.USE_BIOMETRIC",
-    "android.permission.USE_FINGERPRINT", "android.permission.BIND_ACCESSIBILITY_SERVICE",
+    "android.permission.USE_FINGERPRINT",
     "android.permission.ACCESS_NOTIFICATION_POLICY",
     "android.permission.ACCESS_NOTIFICATION_SERVICE", "android.permission.GET_TASKS",
     "android.permission.REAL_GET_TASKS", "android.permission.READ_APP_BADGE",
@@ -823,22 +842,22 @@ NORMAL_PERMS = [
     "android.permission.READ_FRAME_BUFFER", "android.permission.WRITE_FRAME_BUFFER",
     "android.permission.MAGNIFY_CONTROL", "android.permission.ACCESS_SURFACE_FLINGER",
     "android.permission.READ_INPUT_STATE", "android.permission.REORDER_TASKS",
-    "android.permission.CHANGE_CONFIGURATION", "android.permission.KILL_BACKGROUND_PROCESSES",
+    "android.permission.KILL_BACKGROUND_PROCESSES",
     "android.permission.FORCE_STOP_PACKAGES", "android.permission.GET_APP_OPS_STATS",
     "android.permission.SET_ACTIVITY_WATCHER", "android.permission.SUSPEND_APPS",
     "android.permission.GET_TOP_ACTIVITY_INFO", "android.permission.SET_PROCESS_LIMIT",
     "android.permission.SET_ALWAYS_FINISH", "android.permission.SET_DEBUG_APP",
     "android.permission.MOVE_PACKAGE", "android.permission.ACCESS_ALL_EXTERNAL_STORAGE",
     "android.permission.MOUNT_FORMAT_FILESYSTEMS", "android.permission.STORAGE_INTERNAL",
-    "android.permission.GLOBAL_SEARCH", "android.permission.MANAGE_ACCOUNTS",
+    "android.permission.MANAGE_ACCOUNTS",
     "android.permission.AUTHENTICATE_ACCOUNTS", "android.permission.USE_CREDENTIALS",
     "android.permission.INTERACT_ACROSS_USERS_FULL", "android.permission.CREATE_USERS",
     "android.permission.UPDATE_APP_OPS_STATS", "android.permission.ACCESS_KEYGUARD_SECURE",
-    "android.permission.BIND_APPWIDGET", "android.permission.BIND_DEVICE_ADMIN",
+    "android.permission.BIND_APPWIDGET",
     "android.permission.READ_PROFILE", "android.permission.WRITE_PROFILE",
     "android.permission.READ_SOCIAL_STREAM", "android.permission.WRITE_SOCIAL_STREAM",
     "android.permission.READ_USER_DICTIONARY", "android.permission.WRITE_USER_DICTIONARY",
-    "android.permission.BIND_WALLPAPER", "android.permission.INSTALL_LOCATION_PROVIDER",
+    "android.permission.INSTALL_LOCATION_PROVIDER",
     "android.permission.INTERNAL_SYSTEM_WINDOW", "android.permission.LOCATION_HARDWARE",
     "android.permission.MANAGE_APEX_SERVICES", "android.permission.MANAGE_APP_TOKENS",
     "android.permission.MANAGE_CONTENT_CAPTURE",
@@ -860,6 +879,80 @@ NORMAL_PERMS = [
     "android.permission.SET_ORIENTATION", "android.permission.SET_PREFERRED_NETWORKS",
     "android.permission.START_TASKS_FROM_RECENTS", "android.permission.STOP_APP_SWITCHES",
     "android.permission.TRANSMIT_IR", "android.permission.UNINSTALL_SHORTCUT",
+    "android.permission.ACCESS_HIDDEN_PROFILES",
+    "android.permission.ACCESS_LOCATION_EXTRA_COMMANDS",
+    "android.permission.BROADCAST_STICKY", "android.permission.CALL_COMPANION_APP",
+    "android.permission.CAPTURE_KEYBOARD",
+    "android.permission.CREDENTIAL_MANAGER_QUERY_CANDIDATE_CREDENTIALS",
+    "android.permission.CREDENTIAL_MANAGER_SET_ALLOWED_PROVIDERS",
+    "android.permission.CREDENTIAL_MANAGER_SET_ORIGIN",
+    "android.permission.DETECT_SCREEN_CAPTURE", "android.permission.DETECT_SCREEN_RECORDING",
+    "android.permission.ENFORCE_UPDATE_OWNERSHIP",
+    "android.permission.EXECUTE_APP_FUNCTIONS",
+    "android.permission.FOREGROUND_SERVICE_CAMERA",
+    "android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING",
+    "android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION",
+    "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+    "android.permission.FOREGROUND_SERVICE_PHONE_CALL",
+    "android.permission.GET_PACKAGE_SIZE",
+    "android.permission.HIGH_SAMPLING_RATE_SENSORS",
+    "android.permission.MODIFY_AUDIO_SETTINGS",
+    "android.permission.NFC_PREFERRED_PAYMENT_INFO",
+    "android.permission.QUERY_ALL_PACKAGES",
+    "android.permission.READ_ASSIST_STRUCTURE_SCREEN_CONTENT",
+    "android.permission.READ_COLOR_ZONES",
+    "android.permission.REQUEST_COMPANION_PROFILE_GLASSES",
+    "android.permission.REQUEST_COMPANION_PROFILE_WATCH",
+    "android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND",
+    "android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND",
+    "android.permission.REQUEST_COMPANION_USE_DATA_IN_BACKGROUND",
+    "android.permission.RUN_USER_INITIATED_JOBS",
+    "android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION",
+    "android.permission.USE_LOCATION_BUTTON",
+    "android.permission.USE_PINNED_WINDOWING_LAYER",
+]
+
+# Signature-only permissions: NOT grantable by any install profile (the
+# platform grants them only to apps signed with the platform certificate).
+# Display-only in the permission manager so the full Android permission
+# inventory stays visible without ever being pushed to `pm grant`.
+SIGNATURE_PERMS = [
+    "android.permission.BIND_ACCESSIBILITY_SERVICE",
+    "android.permission.BIND_APP_FUNCTION_SERVICE",
+    "android.permission.BIND_AUTOFILL_SERVICE",
+    "android.permission.BIND_CARRIER_MESSAGING_CLIENT_SERVICE",
+    "android.permission.BIND_CHOOSER_TARGET_SERVICE",
+    "android.permission.BIND_CONDITION_PROVIDER_SERVICE",
+    "android.permission.BIND_CONTENT_RESTRICTION_SERVICE",
+    "android.permission.BIND_CONTENT_SAFETY_SERVICE",
+    "android.permission.BIND_CREDENTIAL_PROVIDER_SERVICE",
+    "android.permission.BIND_DATA_MIGRATION_FOR_PRIVATECOMPUTE",
+    "android.permission.BIND_DEVICE_ADMIN",
+    "android.permission.BIND_DREAM_SERVICE",
+    "android.permission.BIND_INPUT_METHOD",
+    "android.permission.BIND_MIDI_DEVICE_SERVICE",
+    "android.permission.BIND_NFC_SERVICE",
+    "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE",
+    "android.permission.BIND_PRINT_SERVICE",
+    "android.permission.BIND_QUICK_ACCESS_WALLET_SERVICE",
+    "android.permission.BIND_TEXT_SERVICE",
+    "android.permission.BIND_VOICE_INTERACTION",
+    "android.permission.BIND_VPN_SERVICE",
+    "android.permission.BIND_VR_LISTENER_SERVICE",
+    "android.permission.RECEIVE_SENSITIVE_NOTIFICATIONS",
+    "android.permission.REPOSITION_SELF_WINDOWS",
+    "android.permission.START_VIEW_APP_FEATURES",
+    "android.permission.START_VIEW_PERMISSION_USAGE",
+]
+
+# Google Play services / vendor permissions (com.google.* / com.android.vending)
+# - signature-bound to the GMS key, not part of the AOSP Manifest.permission
+# reference. Display-only, same as SIGNATURE_PERMS.
+GMS_PERMS = [
+    "com.google.android.gms.permission.AD_ID",
+    "com.google.android.c2dm.permission.RECEIVE",
+    "com.google.android.providers.gsf.permission.READ_GSERVICES",
+    "com.android.vending.permission.C2D_MESSAGE",
 ]
 
 
@@ -2601,8 +2694,10 @@ class ADBManager:
     def verify_boot_and_packages(self, packages, log=None, timeout=120,
                                  poll=5):
         """Wait until Android reports sys.boot_completed=1, then check
-        `pm list packages` for every package. Returns {pkg: bool}; an
-        empty dict means boot could not be confirmed (adb unavailable)."""
+        `pm list packages -s` for every package - the package must be
+        installed as a SYSTEM app (a plain user install does not count).
+        Returns {pkg: bool}; an empty dict means boot could not be
+        confirmed (adb unavailable)."""
         log = log or (lambda m: None)
         deadline = time.time() + timeout
         while True:
@@ -2615,20 +2710,73 @@ class ADBManager:
                     f"{timeout}s (is adb available?)")
                 return {}
             time.sleep(poll)
-        log("WSA boot completed - verifying package visibility")
+        log("WSA boot completed - verifying SYSTEM install")
         result = {}
         for pkg in packages:
-            out = self._run(["shell", "pm", "list", "packages", pkg])
+            out = self._run(["shell", "pm", "list", "packages", "-s", pkg])
             found = f"package:{pkg}" in out.replace("\r", "")
-            result[pkg] = found
             if found:
-                log(f"Verified: {pkg} is installed and visible")
+                result[pkg] = True
+                log(f"Verified: {pkg} is installed as a SYSTEM app")
+                continue
+            plain = self._run(["shell", "pm", "list", "packages", pkg])
+            user_only = f"package:{pkg}" in plain.replace("\r", "")
+            result[pkg] = False
+            if user_only:
+                log(f"NOT a system app: {pkg} is installed as USER app only")
+                log("  The system module was not merged yet - reboot WSA "
+                    "once more and re-check.")
             else:
                 log(f"NOT visible yet: {pkg}")
                 log("  The module is merged at the next post-fs-data - "
                     "reboot WSA once more and re-check.")
-                log("  Boot diagnostics: adb root; "
-                    "cat /data/adb/lsp-boot.log")
+            log("  Boot diagnostics: adb root; "
+                "cat /data/adb/lsp-boot.log")
+        return result
+
+    def verify_system_removed(self, packages, log=None, timeout=120,
+                              poll=5):
+        """Wait for boot, then poll `pm list packages -s` until none of
+        `packages` is still listed as a SYSTEM package.
+
+        Success means removed-as-system; a package that was reinstalled
+        afterwards as a plain USER app does not block success (it will not
+        show up in the -s list). Returns {pkg: True} when verified,
+        {pkg: False} on timeout, {} when boot/adb could not be confirmed."""
+        log = log or (lambda m: None)
+        deadline = time.time() + timeout
+        while True:
+            self._run(["connect", self.device])
+            out = self._run(["shell", "getprop", "sys.boot_completed"])
+            if out.strip().replace("\r", "") == "1":
+                break
+            if time.time() >= deadline:
+                log(f"Verification skipped: WSA boot not confirmed within "
+                    f"{timeout}s (is adb available?)")
+                return {}
+            time.sleep(poll)
+        log("WSA boot completed - verifying system removal")
+        pending = list(packages)
+        deadline = time.time() + timeout
+        while pending and time.time() < deadline:
+            still = []
+            for pkg in pending:
+                out = self._run(["shell", "pm", "list", "packages", "-s", pkg])
+                if f"package:{pkg}" in out.replace("\r", ""):
+                    still.append(pkg)
+            pending = still
+            if pending:
+                time.sleep(poll)
+        result = {}
+        for pkg in packages:
+            removed = pkg not in pending
+            result[pkg] = removed
+            if removed:
+                log(f"Verified: {pkg} is no longer a system app "
+                    "(a later user reinstall stays separate)")
+            else:
+                log(f"STILL a system app: {pkg} - the boot handler has not "
+                    "removed it yet")
         return result
 
     def is_recovery(self):
@@ -2870,6 +3018,16 @@ class PermissionManagerWindow(QWidget):
                 continue
             seen.add(perm)
             self._perm_checks.append({"perm": perm, "checked": False, "locked": False, "greyed": True, "cat": "normal"})
+        for perm in SIGNATURE_PERMS:
+            if perm in seen:
+                continue
+            seen.add(perm)
+            self._perm_checks.append({"perm": perm, "checked": False, "locked": True, "greyed": True, "cat": "signature"})
+        for perm in GMS_PERMS:
+            if perm in seen:
+                continue
+            seen.add(perm)
+            self._perm_checks.append({"perm": perm, "checked": False, "locked": True, "greyed": True, "cat": "gms"})
         self._pm_h = self.PM_H
         self.setFixedSize(self.PM_W, self._pm_h)
         self._build_layout()
@@ -4516,6 +4674,80 @@ class InfoDialog(LogDialog):
         self._finished = True
 
 
+class PackageSelectDialog(QDialog):
+    """Checkbox picker for system app packages: multi-select (any
+    combination), select-all, or a manual comma-separated entry line."""
+
+    def __init__(self, title, packages, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(440, 470)
+        layout = QVBoxLayout(self)
+        hint = QLabel(
+            "Select the package(s) to remove via checkbox, use "
+            "'Select all', or type package name(s) below:")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self._list = QListWidget(self)
+        for pkg in packages:
+            item = QListWidgetItem(pkg)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            self._list.addItem(item)
+        self._list.itemChanged.connect(self._refresh_count)
+        layout.addWidget(self._list)
+        row = QHBoxLayout()
+        self._select_all = QPushButton("Select all")
+        self._select_all.clicked.connect(self._select_all_items)
+        self._clear = QPushButton("Clear")
+        self._clear.clicked.connect(self._clear_items)
+        self._count = QLabel("")
+        row.addWidget(self._select_all)
+        row.addWidget(self._clear)
+        row.addStretch(1)
+        row.addWidget(self._count)
+        layout.addLayout(row)
+        self._manual = QLineEdit(self)
+        self._manual.setPlaceholderText(
+            "Or type package name(s), comma-separated (e.g. com.a, com.b)")
+        layout.addWidget(self._manual)
+        btns = QHBoxLayout()
+        ok = QPushButton("Uninstall")
+        cancel = QPushButton("Cancel")
+        ok.clicked.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+        btns.addStretch(1)
+        btns.addWidget(ok)
+        btns.addWidget(cancel)
+        layout.addLayout(btns)
+        self._refresh_count()
+
+    def _refresh_count(self, *_):
+        self._count.setText(
+            f"{len(self._checked())} checked / {self._list.count()} listed")
+
+    def _checked(self):
+        picked = []
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if item.checkState() == Qt.Checked:
+                picked.append(item.text())
+        return picked
+
+    def _select_all_items(self):
+        for i in range(self._list.count()):
+            self._list.item(i).setCheckState(Qt.Checked)
+
+    def _clear_items(self):
+        for i in range(self._list.count()):
+            self._list.item(i).setCheckState(Qt.Unchecked)
+
+    def selected_packages(self):
+        manual = [t for t in re.split(r"[,\s]+",
+                                      self._manual.text() or "") if t]
+        return list(dict.fromkeys(self._checked() + manual))
+
+
 class ImgManagerWindow(QWidget):
     """7-Zip style manager for the initrd.img cpio archive.
 
@@ -5563,27 +5795,36 @@ class ImgManagerWindow(QWidget):
         mode = self._admin_gate()
         if mode is None:
             return
-        text, ok = QInputDialog.getText(
-            self, "Uninstall system app",
-            "Package name (e.g. com.example.app):")
-        if not ok:
+        try:
+            packages = self._twrp.list_lsp_packages(
+                initrd_path=self._real_path, mode=mode)
+        except Exception:
+            packages = []
+        dlg = PackageSelectDialog(
+            f"Uninstall system app ({mode} module)", packages, self)
+        if dlg.exec() != QDialog.Accepted:
             return
-        pkg = (text or "").strip()
-        if not pkg:
-            self._info("No package name entered \u2014 nothing to do.")
+        selected = dlg.selected_packages()
+        if not selected:
+            self._info("No package selected \u2014 nothing to do.")
             return
+        label = (selected[0] if len(selected) == 1
+                 else f"{len(selected)} packages")
         if not self._confirm(
-                f"Remove {pkg} from the {mode.upper()} system apps?\n"
+                f"Remove {label} from the {mode.upper()} system apps?\n"
                 f"Only the {mode} module image is touched.\n"
-                "The removal is scheduled for the next boot."):
+                "WSA is then started, the removal is verified over adb and "
+                "WSA is stopped again automatically."):
             return
         if not self._confirm_live("uninstall system apps"):
             return
-        dlg = LogDialog(f"Uninstall system app \u2014 {pkg} ({mode} module)", self)
-        dlg.finished.connect(lambda _r: self._after_live_change())
-        dlg.run_printing(self._twrp.uninstall_boltware, dict(
-            apk_name=pkg, initrd_path=self._real_path, mode=mode))
-        dlg.show()
+        out = LogDialog(
+            f"Uninstall system app \u2014 {label} ({mode} module)", self)
+        out.finished.connect(lambda _r: self._after_live_change())
+        out.run_printing(self._twrp.uninstall_boltware, dict(
+            apk_name=selected if len(selected) > 1 else selected[0],
+            initrd_path=self._real_path, mode=mode))
+        out.show()
 
     def _cli_enable(self):
         if not self._confirm_live("enable TWRP recovery"):
@@ -7376,6 +7617,47 @@ class WSATWRP:
         finally:
             shutil.rmtree(LSP_TEMP, ignore_errors=True)
 
+    def _collect_lsp_packages(self, initrd):
+        """Package directory names inside the current module image
+        (read-only data twin of _list_lsp_apps for pickers)."""
+        if not initrd.has_lsp_image():
+            return []
+        extract_dir = initrd.extract_lsp_image()
+        if not extract_dir:
+            return []
+        try:
+            priv_app = os.path.join(extract_dir, "system", "priv-app")
+            if not os.path.isdir(priv_app):
+                return []
+            return sorted(d for d in os.listdir(priv_app)
+                          if os.path.isdir(os.path.join(priv_app, d)))
+        finally:
+            shutil.rmtree(LSP_TEMP, ignore_errors=True)
+
+    def list_lsp_packages(self, initrd_path=None, mode=None):
+        """Return the system app package names inside the module image(s).
+        Silent (no prints): returns [] on any resolution failure so CLI/GUI
+        pickers can show an empty list plus a manual entry option."""
+        initrd = None
+        if initrd_path:
+            if os.path.exists(initrd_path):
+                initrd = InitrdManager(initrd_path)
+        else:
+            wsa_path = WSADetector.find_path()
+            if wsa_path:
+                p = WSADetector.initrd_path(wsa_path)
+                if os.path.exists(p):
+                    initrd = InitrdManager(p)
+        if initrd is None or initrd.is_stock():
+            return []
+        pkgs = []
+        for m in (["admin", "user"] if mode is None else [mode]):
+            select_image(m)
+            for p in self._collect_lsp_packages(initrd):
+                if p not in pkgs:
+                    pkgs.append(p)
+        return pkgs
+
     def uninstall_boltware(self, apk_name=None, initrd_path=None, mode=None):
         if initrd_path:
             if not os.path.exists(initrd_path):
@@ -7408,18 +7690,87 @@ class WSATWRP:
         pending = []
         for m in modes:
             select_image(m)
-            pending.extend(self._uninstall_boltware_image(initrd, apk_name))
+            if isinstance(apk_name, (list, tuple)):
+                names = [n for n in apk_name if n]
+                if not names:
+                    pending.extend(self._uninstall_boltware_image(initrd, None))
+                else:
+                    for n in names:
+                        pending.extend(self._uninstall_boltware_image(initrd, n))
+            else:
+                pending.extend(self._uninstall_boltware_image(initrd, apk_name))
         pending = list(dict.fromkeys(pending))
         if pending:
             initrd.patch_postfsdata_uninstall()
             initrd.inject_uninstall_txt(pending)
             print(f"Uninstall scheduled for {len(pending)} package(s) on next boot")
+            if self._uninstall_auto_verify(initrd_path, pending):
+                return
             print("IMPORTANT: uninstall.txt lives inside the image and the list "
                   "runs on EVERY boot.")
             print("After the next boot has removed the app, run "
                   "--cleanup-uninstall ('Uninstall temp cleanup' in the manager)")
             print("to clear it - otherwise a later reinstall would be removed "
                   "again on the next boot.")
+
+    def _uninstall_auto_verify(self, initrd_path, packages):
+        """Live-WSA image only: boot WSA, verify via adb that no selected
+        package is still a SYSTEM app (`pm list packages -s`), stop WSA and
+        delete uninstall.txt - so no manual cleanup step remains.
+        Returns True when everything completed; False = the caller keeps
+        the manual-cleanup fallback."""
+        wsa_dir = WSADetector.find_path()
+        if not wsa_dir:
+            return False
+        live = WSADetector.initrd_path(wsa_dir)
+        try:
+            same = (os.path.normcase(os.path.normpath(live)) ==
+                    os.path.normcase(os.path.normpath(initrd_path)))
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            print("Target is not the live WSA initrd - adb verification skipped")
+            return False
+        print("Starting WSA to verify the uninstall over adb...")
+        if not WSADetector.ensure_running():
+            print("Could not start WSA - verification skipped")
+            return False
+        removed = ADBManager().verify_system_removed(
+            packages, log=print, timeout=120, poll=5)
+        if not removed or not all(removed.values()):
+            print("Not verified within the timeout - uninstall.txt kept "
+                  "for safety")
+            print("Reboot WSA once more, re-check, then run "
+                  "--cleanup-uninstall manually")
+            return False
+        print("Stopping WSA...")
+        KillWSA.kill_all()
+        return self._remove_uninstall_txt(initrd_path, print)
+
+    @staticmethod
+    def _remove_uninstall_txt(initrd_path, log=print):
+        """Shared by the cleanup flow and the uninstall auto-verify path:
+        delete overlay.d/sbin/uninstall.txt and report what it held."""
+        arcname = "overlay.d/sbin/uninstall.txt"
+        if not CpioUtils.has_file(initrd_path, arcname):
+            log("No uninstall.txt - nothing to clean")
+            return False
+        try:
+            data = CpioUtils.read_file(initrd_path, arcname)
+        except Exception:
+            data = b""
+        packages = [line.strip() for line
+                    in data.decode("utf-8", "replace").splitlines()
+                    if line.strip()]
+        if packages:
+            log(f"Scheduled list: {', '.join(packages)}")
+        log(f"Removing /{arcname}...")
+        CpioUtils.delete_file(initrd_path, arcname)
+        log(f"Removed uninstall.txt ({len(packages)} package(s) cleared)")
+        log("The boot handler will no longer re-run these uninstalls")
+        log("No manual cleanup needed - a later reinstall will not be "
+            "re-removed on the next boot")
+        return True
 
     def _uninstall_boltware_image(self, initrd, apk_name):
         arcname = f"overlay.d/sbin/{LSP_IMAGE_NAME}"
@@ -7827,6 +8178,8 @@ class WSATWRP:
         The boot handler consumes its runtime copy but the archive entry in
         initrd.img survives every reboot, so the same list would keep running
         on each boot (and remove the app again after a later reinstall).
+        The file handling itself is shared with the uninstall auto-verify
+        path via _remove_uninstall_txt().
         """
         _debug("_flow_cleanup_uninstall() started")
         resolved = self._resolve_initrd(log, window, target_initrd)
@@ -7834,26 +8187,7 @@ class WSATWRP:
             return
         initrd_path, is_wsa_img = resolved
 
-        arcname = "overlay.d/sbin/uninstall.txt"
-        if not CpioUtils.has_file(initrd_path, arcname):
-            log("No uninstall.txt - nothing to clean")
-            time.sleep(2)
-            window.request_close()
-            return
-
-        try:
-            data = CpioUtils.read_file(initrd_path, arcname)
-        except Exception:
-            data = b""
-        packages = [line.strip() for line
-                    in data.decode("utf-8", "replace").splitlines()
-                    if line.strip()]
-        if packages:
-            log(f"Scheduled list: {', '.join(packages)}")
-        log(f"Removing /{arcname}...")
-        CpioUtils.delete_file(initrd_path, arcname)
-        log(f"Removed uninstall.txt ({len(packages)} package(s) cleared)")
-        log("The boot handler will no longer re-run these uninstalls")
+        self._remove_uninstall_txt(initrd_path, log)
         time.sleep(1)
         window.request_close()
 
@@ -7867,6 +8201,61 @@ def _parse_into(args_list):
         dest = "/".join(args_list[idx + 1:]) if idx + 1 < len(args_list) else "/"
         return path, dest
     return args_list[0] if args_list else None, "/"
+
+
+def parse_uninstall_selection(raw, packages):
+    """Parse one interactive picker answer against `packages`.
+
+    Returns ("pick", [pkg, ...]) for numbers/dotted names, ("all", []) for
+    'all'/'*', ("cancel", []) for empty/'q' and ("invalid", [bad tokens])
+    so the caller can re-prompt. Pure function - unit-testable."""
+    text = (raw or "").strip()
+    if not text or text.lower() in ("q", "quit", "c", "cancel"):
+        return ("cancel", [])
+    tokens = [t for t in re.split(r"[,\s]+", text) if t]
+    if any(t.lower() == "all" for t in tokens) or text == "*":
+        return ("all", [])
+    picked, names, bad = [], [], []
+    for t in tokens:
+        if t.isdigit():
+            idx = int(t)
+            if 1 <= idx <= len(packages):
+                picked.append(packages[idx - 1])
+            else:
+                bad.append(t)
+        elif "." in t:
+            names.append(t)
+        else:
+            bad.append(t)
+    if bad:
+        return ("invalid", bad)
+    selected = list(dict.fromkeys(picked + names))
+    return ("pick", selected) if selected else ("cancel", [])
+
+
+def prompt_uninstall_selection(packages, input_fn=input, out=print, tries=3):
+    """Interactive CLI picker: numbered list + free-form answer.
+    Returns (action, selected) as parse_uninstall_selection does."""
+    if not packages:
+        out("No packages in this module image - nothing to pick from")
+        return ("cancel", [])
+    out("Packages in this module image:")
+    for i, p in enumerate(packages, 1):
+        out(f"  {i}. {p}")
+    out("Enter numbers (e.g. 1,3), a package name, 'all' or 'q' to cancel:")
+    for _ in range(tries):
+        try:
+            raw = input_fn("> ")
+        except (EOFError, KeyboardInterrupt):
+            out("")
+            return ("cancel", [])
+        action, sel = parse_uninstall_selection(raw, packages)
+        if action == "invalid":
+            out("Invalid: " + ", ".join(sel) +
+                " - use list numbers, a package name, 'all' or 'q':")
+            continue
+        return action, sel
+    return ("cancel", [])
 
 
 def main():
@@ -7892,8 +8281,10 @@ Examples:
   {CLI_NAME} --install-as-system-app a.apk b.apk          Install multiple APKs
   {CLI_NAME} --list-of-boltware                           List system apps
   {CLI_NAME} --uninstall-boltware com.wsa.webdav          Remove specific app (USER image)
-  {CLI_NAME} --uninstall-boltware --admin                Remove from the ADMIN image
-  {CLI_NAME} --uninstall-boltware                          Remove all USER system apps
+  {CLI_NAME} --uninstall-boltware com.a com.b             Remove several apps
+  {CLI_NAME} --uninstall-boltware                         Interactive picker (numbers/name/all)
+  {CLI_NAME} --uninstall-boltware all                     Remove all USER system apps
+  {CLI_NAME} --uninstall-boltware --admin                 Remove from the ADMIN image
   {CLI_NAME} --cleanup-uninstall                           Clear uninstall.txt after the removal boot
   {CLI_NAME} --install-as-system-app app.apk              Install into USER module (default)
   {CLI_NAME} --install-as-system-app app.apk --admin      Install into ADMIN module (password)
@@ -7932,8 +8323,10 @@ Examples:
                         help="Update/reinstall APK(s) as system app (overrides existing)")
     parser.add_argument("--list-of-boltware", action="store_true",
                         help="List all system apps in both module images")
-    parser.add_argument("--uninstall-boltware", nargs='?', const="", default=None,
-                        help="Remove app from the module image (no arg = whole image). "
+    parser.add_argument("--uninstall-boltware", nargs='*', default=None,
+                        help="Remove app(s) from the module image: give package "
+                             "name(s), or 'all' for the whole image, or no value "
+                             "for an interactive picker (numbers / name / all). "
                              "USER image by default; add --admin for the ADMIN image")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--admin", action="store_true",
@@ -8039,11 +8432,29 @@ Examples:
     if args.uninstall_boltware is not None:
         _debug("Command: --uninstall-boltware")
         twrp = WSATWRP()
-        twrp.uninstall_boltware(
-            apk_name=args.uninstall_boltware or None,
-            initrd_path=args.path,
-            mode=mode,
-        )
+        chosen = [c for c in args.uninstall_boltware if c]
+        if chosen and all(c.strip().lower() == "all" for c in chosen):
+            twrp.uninstall_boltware(apk_name=None, initrd_path=args.path,
+                                    mode=mode)
+            return
+        if chosen:
+            twrp.uninstall_boltware(apk_name=chosen, initrd_path=args.path,
+                                    mode=mode)
+            return
+        # Bare flag -> interactive picker over the module image.
+        packages = twrp.list_lsp_packages(initrd_path=args.path,
+                                          mode=mode or "user")
+        action, selected = prompt_uninstall_selection(packages)
+        if action == "cancel":
+            print("Cancelled - nothing removed")
+            return
+        if action == "all":
+            twrp.uninstall_boltware(apk_name=None, initrd_path=args.path,
+                                    mode=mode)
+            return
+        print(f"Selected {len(selected)} package(s): {', '.join(selected)}")
+        twrp.uninstall_boltware(apk_name=selected, initrd_path=args.path,
+                                mode=mode)
         return
 
     if args.cleanup_uninstall:

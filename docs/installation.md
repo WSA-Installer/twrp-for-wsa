@@ -222,17 +222,20 @@ replaced inside `lsp_wsa-installer[-user].img`, and a `*.img.bak-*` is written
 first. Details: [Admin & User Modules](admin-user-modules.md).
 
 After writing the image the flow starts WSA, waits for
-`sys.boot_completed=1` and runs `pm list packages` for every APK
-(`ADBManager.verify_boot_and_packages()`). The log then shows either
+`sys.boot_completed=1` and runs `pm list packages -s` for every APK
+(`ADBManager.verify_boot_and_packages()`) — the check verifies a **system**
+install, not just visibility. The log then shows either
 
 ```
-Verified: com.example.app is installed and visible
+Verified: com.example.app is installed as a SYSTEM app
 ```
 
-or, when the package is not visible yet (the module is merged at the *next*
-post-fs-data — the usual case on the very first boot):
+or one of
 
 ```
+NOT a system app: com.example.app is installed as USER app only
+  The system module was not merged yet - reboot WSA once more and re-check.
+
 NOT visible yet: com.example.app
   The module is merged at the next post-fs-data - reboot WSA once more and re-check.
   Boot diagnostics: adb root; cat /data/adb/lsp-boot.log
@@ -255,10 +258,13 @@ or `user`.
 
 ```cmd
 twrp.exe --uninstall-boltware com.example.app
+twrp.exe --uninstall-boltware          # interactive picker
 ```
 
 Adds the package to `uninstall.txt`; the boot hook applies it the next time
-Android starts. Details: [Boltware Manager](boltware-manager.md).
+Android starts. For the live WSA image the flow then **verifies over adb**
+(`pm list packages -s`), stops WSA and deletes `uninstall.txt` automatically.
+Details: [Boltware Manager](boltware-manager.md).
 
 ### Install the boot hook
 

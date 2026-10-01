@@ -526,7 +526,8 @@ default**; the ADMIN image is never touched without `--admin`.
 ```cmd
 twrp.exe --uninstall-boltware com.wsa.webdav   # one package (USER image)
 twrp.exe --uninstall-boltware com.a com.b      # several (USER image)
-twrp.exe --uninstall-boltware                  # no arg = whole USER image
+twrp.exe --uninstall-boltware                  # interactive picker (numbers/name/all/q)
+twrp.exe --uninstall-boltware all              # whole USER image (every system app)
 twrp.exe --uninstall-boltware --admin com.x    # ADMIN image (gate)
 twrp.exe --uninstall-boltware --user com.x     # USER image (explicit)
 ```
@@ -535,8 +536,17 @@ Packages are collected **within the selected module**, de-duplicated, written to
 `overlay.d/sbin/uninstall.txt` **once**, and the boot handler in
 `post-fs-data.sh` is (re)written. To clear an app from both modules, run twice
 (plain, then `--admin`). Nothing is removed until WSA reboots.
-After that boot has removed the app, clear the list with
+
+**Automatic verification (live WSA image):** after the patch, WSA is started,
+the removal is polled via `adb shell pm list packages -s` until no selected
+package is still a **system** app (a later *user* reinstall does not block
+success), WSA is stopped and `uninstall.txt` is deleted automatically — no
+manual cleanup. For external `--path` images or when verification times out,
+clear the list afterwards with
 [`--cleanup-uninstall`](#--cleanup-uninstall) (next section).
+
+The GUI **Uninstall system app** button shows the same packages as a
+checkbox list (multi-select / *Select all* / manual entry line).
 
 See [Boltware Manager](boltware-manager.md).
 
@@ -557,8 +567,10 @@ twrp.exe --cleanup-uninstall --path <initrd.img>
 reboot, so the same list runs on **every** boot. Reinstalling the app days
 later would have it uninstalled again on the next boot.
 
-Run it **once after the boot that applied an uninstall** (the removal is
-logged next to the handler, see `post-fs-data.log`). The handler in
+Run it **once after the boot that applied an uninstall** when the automatic
+verification was skipped (external `--path`, adb unavailable or the 120 s
+timeout passed — the log prints the fallback note in that case). The removal
+itself is logged next to the handler, see `post-fs-data.log`. The handler in
 `post-fs-data.sh` stays — it is a harmless no-op without the file and remains
 ready for the next `--uninstall-boltware`.
 

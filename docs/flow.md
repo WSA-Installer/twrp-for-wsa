@@ -221,8 +221,10 @@ twrp.exe --update-as-system-app app.apk
    an older `post-fs-data.sh` is upgraded to the debug version
 10. **Boot + verify** — WSA is started and
     `ADBManager.verify_boot_and_packages()` waits for `sys.boot_completed=1`,
-    then runs `pm list packages` per APK; a not-yet-visible package gets the
-    *reboot WSA once more* hint (the module merges at the next post-fs-data)
+    then runs `pm list packages -s` per APK: the package must be installed as
+    a **system** app. A package that is only a *user* app (module not merged
+    yet) or missing entirely gets the *reboot WSA once more* hint (the module
+    merges at the next post-fs-data)
 
 ### Mermaid Diagram
 
@@ -263,14 +265,21 @@ first).
 
 1. Select the module: **USER image by default**, ADMIN image only with `--admin`
    (a plain run never extracts or repacks the admin image)
-2. Remove the package from that image (no package argument = delete the whole
-   selected module image)
-3. Append the package to `uninstall.txt` inside the image
-4. `patch_postfsdata_uninstall()` (via `build_boot_script()`) rewrites
+2. Resolve the target packages: explicit argument (string or list), the whole
+   selected module image (`apk_name=None` / `all`) or — bare flag / GUI
+   button — the **picker** (`list_lsp_packages()` + numbered prompt /
+   checkbox dialog)
+3. Remove the package(s) from that image
+4. Append the packages to `uninstall.txt` inside the image
+5. `patch_postfsdata_uninstall()` (via `build_boot_script()`) rewrites
    `overlay.d/sbin/post-fs-data.sh` with the canonical debug script and its
    background uninstall handler
-5. On next boot the hook removes the app from the running system
-6. Afterwards run `--cleanup-uninstall` to drop the scheduled entry
+6. On next boot the hook removes the app from the running system
+7. **Live WSA image only:** `_uninstall_auto_verify()` starts WSA, waits for
+   `sys.boot_completed=1`, polls `pm list packages -s` until no selected
+   package is still a system app, stops WSA and deletes `uninstall.txt`
+   automatically. External `--path` / not verified → the
+   `--cleanup-uninstall` fallback is printed instead
 
 ---
 

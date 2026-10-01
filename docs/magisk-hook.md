@@ -171,7 +171,11 @@ writes it and `--cleanup-uninstall` deletes it.
 The handler deletes only its **runtime copy** — `uninstall.txt` itself lives
 inside `initrd.img`, so the archive entry survives every reboot and the same
 list would run again on the next boot (a later reinstall would be removed
-again!). **After the removal boot, clear it**: `twrp.py --cleanup-uninstall`
+again!). For the live WSA image `--uninstall-boltware` therefore verifies the
+removal over adb (`pm list packages -s`) and **deletes `uninstall.txt`
+automatically** once no selected package is still a system app. When that
+automatic step is skipped (external `--path`, adb unavailable, timeout),
+clear it manually: `twrp.py --cleanup-uninstall`
 (GUI: **Uninstall temp cleanup** button), which deletes the file from the
 image and leaves the handler in place (a harmless no-op without the list).
 
