@@ -64,6 +64,9 @@ def resource_path(relative_path):
 
 APP_NAME = "TWRP Recovery For WSA"
 APP_VERSION = "4.1.0"
+# Description used for the shared Applications\Twrp.exe Open-with entry
+# (both the .img and .vhdx registrations write it; one stable owner string).
+APP_DESC = "WSA Installer"
 
 
 def _detect_cli_name():
@@ -215,6 +218,12 @@ IMG_VERB_KEY = "WsaInstallerImgManager"
 IMG_VERB_TEXT = "Open in WSA IMG Manager"
 IMG_DESC = "WSA IMG Manager"
 
+# --- .vhdx "Open with" / Explorer context menu ------------------------------
+VHDX_PROGID = "wsa-installer.vhdx"
+VHDX_VERB_KEY = "WsaInstallerVhdxManager"
+VHDX_VERB_TEXT = "Open in WSA VHDX Manager"
+VHDX_DESC = "WSA VHDX Manager"
+
 
 def _img_icon_path():
     _dir = os.path.dirname(os.path.abspath(__file__))
@@ -225,8 +234,11 @@ def _img_icon_path():
     return os.path.abspath(sys.executable)
 
 
-def img_open_command(command=None):
-    """Registry command line that opens an .img with the IMG Manager GUI."""
+def _gui_open_command(flag, command=None):
+    """Registry command line that opens a file with one of the GUI managers.
+
+    `flag` is the CLI switch that launches the matching window (--gui or
+    --vhdx-gui)."""
     if command:
         return command
     _here = os.path.dirname(os.path.abspath(__file__))
@@ -234,28 +246,36 @@ def img_open_command(command=None):
         _exe = os.path.dirname(os.path.abspath(sys.executable))
         _twrp = os.path.join(_exe, "Twrp.exe")
         if os.path.isfile(_twrp):
-            return f'"{_twrp}" --gui --path "%1"'
-        return f'"{os.path.abspath(sys.executable)}" --gui --path "%1"'
+            return f'"{_twrp}" {flag} --path "%1"'
+        return f'"{os.path.abspath(sys.executable)}" {flag} --path "%1"'
     _script = os.path.join(_here, "twrp.py")
     _pyw = os.path.join(_here, "venv", "Scripts", "pythonw.exe")
     if not os.path.isfile(_pyw):
         _pyw = sys.executable
-    return f'"{_pyw}" "{_script}" --gui --path "%1"'
+    return f'"{_pyw}" "{_script}" {flag} --path "%1"'
 
 
-def register_img_handler(command=None):
-    """Add ".img -> Open with -> WSA IMG Manager" plus a classic right-click verb.
+def img_open_command(command=None):
+    """Registry command line that opens an .img with the IMG Manager GUI."""
+    return _gui_open_command("--gui", command)
 
-    Only additive keys are written: .img's own default value is never touched,
-    so the existing default handler (7-Zip, WinRAR, ...) keeps working."""
-    cmd = img_open_command(command)
-    icon = _img_icon_path()
+
+def vhdx_open_command(command=None):
+    """Registry command line that opens a .vhdx with the VHDX Manager GUI."""
+    return _gui_open_command("--vhdx-gui", command)
+
+
+def _register_handler(ext, progid, verb_key, verb_text, desc, cmd, icon):
+    """Write the additive "Open with" + right-click verb keys for one extension.
+
+    Only additive keys are written: the extension's own default value is never
+    touched, so an existing default handler (7-Zip, WinRAR, ...) keeps working.
+    Returns 0 on success, 1 on registry failure."""
     cls = "Software\\Classes"
-
     hk = winreg.HKEY_LOCAL_MACHINE
     root_name = "HKLM"
     try:
-        _probe = winreg.OpenKey(hk, f"{cls}\\.img", 0, winreg.KEY_WRITE)
+        _probe = winreg.OpenKey(hk, f"{cls}\\{ext}", 0, winreg.KEY_WRITE)
         winreg.CloseKey(_probe)
     except OSError:
         hk = winreg.HKEY_CURRENT_USER
@@ -263,23 +283,23 @@ def register_img_handler(command=None):
 
     writes = [
         # 1) makes the ProgID eligible for the "Open with" list
-        (f"{cls}\\.img\\OpenWithProgids", IMG_PROGID, b"", winreg.REG_NONE),
+        (f"{cls}\\{ext}\\OpenWithProgids", progid, b"", winreg.REG_NONE),
         # 2) the named ProgID entry
-        (f"{cls}\\{IMG_PROGID}", "", IMG_DESC, winreg.REG_SZ),
-        (f"{cls}\\{IMG_PROGID}\\DefaultIcon", "", icon, winreg.REG_SZ),
-        (f"{cls}\\{IMG_PROGID}\\shell\\open\\command", "", cmd, winreg.REG_SZ),
+        (f"{cls}\\{progid}", "", desc, winreg.REG_SZ),
+        (f"{cls}\\{progid}\\DefaultIcon", "", icon, winreg.REG_SZ),
+        (f"{cls}\\{progid}\\shell\\open\\command", "", cmd, winreg.REG_SZ),
         # 3) classic right-click verb directly on the extension
-        (f"{cls}\\.img\\shell\\{IMG_VERB_KEY}", "", IMG_VERB_TEXT, winreg.REG_SZ),
-        (f"{cls}\\.img\\shell\\{IMG_VERB_KEY}", "MUIVerb", IMG_VERB_TEXT, winreg.REG_SZ),
-        (f"{cls}\\.img\\shell\\{IMG_VERB_KEY}", "Icon", icon, winreg.REG_SZ),
-        (f"{cls}\\.img\\shell\\{IMG_VERB_KEY}\\command", "", cmd, winreg.REG_SZ),
+        (f"{cls}\\{ext}\\shell\\{verb_key}", "", verb_text, winreg.REG_SZ),
+        (f"{cls}\\{ext}\\shell\\{verb_key}", "MUIVerb", verb_text, winreg.REG_SZ),
+        (f"{cls}\\{ext}\\shell\\{verb_key}", "Icon", icon, winreg.REG_SZ),
+        (f"{cls}\\{ext}\\shell\\{verb_key}\\command", "", cmd, winreg.REG_SZ),
     ]
     # 4) exe-based Open-with entry (frozen build only)
     if getattr(sys, "frozen", False):
         writes += [
-            (f"{cls}\\Applications\\Twrp.exe", "", IMG_DESC, winreg.REG_SZ),
+            (f"{cls}\\Applications\\Twrp.exe", "", APP_DESC, winreg.REG_SZ),
             (f"{cls}\\Applications\\Twrp.exe\\shell\\open\\command", "", cmd, winreg.REG_SZ),
-            (f"{cls}\\Applications\\Twrp.exe\\SupportedTypes", ".img", b"", winreg.REG_NONE),
+            (f"{cls}\\Applications\\Twrp.exe\\SupportedTypes", ext, b"", winreg.REG_NONE),
         ]
 
     try:
@@ -290,7 +310,7 @@ def register_img_handler(command=None):
         print(f"  [error] registry write failed: {ex}", flush=True)
         return 1
 
-    print(f"  [registered] {IMG_DESC} (.img Open with) [{root_name}]", flush=True)
+    print(f"  [registered] {desc} ({ext} Open with) [{root_name}]", flush=True)
     print(f"  command: {cmd}", flush=True)
     try:
         ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x1000, None, None)
@@ -299,8 +319,8 @@ def register_img_handler(command=None):
     return 0
 
 
-def unregister_img_handler():
-    """Remove exactly the keys register_img_handler() wrote (idempotent)."""
+def _unregister_handler(ext, progid, verb_key, desc):
+    """Remove exactly the keys _register_handler() wrote for one extension."""
     cls = "Software\\Classes"
     removed = 0
 
@@ -322,18 +342,18 @@ def unregister_img_handler():
             pass
 
     for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
-        _del_value(hive, f"{cls}\\.img\\OpenWithProgids", IMG_PROGID)
+        _del_value(hive, f"{cls}\\{ext}\\OpenWithProgids", progid)
         for p in (
-            f"{cls}\\.img\\shell\\{IMG_VERB_KEY}\\command",
-            f"{cls}\\.img\\shell\\{IMG_VERB_KEY}",
-            f"{cls}\\{IMG_PROGID}\\shell\\open\\command",
-            f"{cls}\\{IMG_PROGID}\\shell\\open",
-            f"{cls}\\{IMG_PROGID}\\shell",
-            f"{cls}\\{IMG_PROGID}\\DefaultIcon",
-            f"{cls}\\{IMG_PROGID}",
+            f"{cls}\\{ext}\\shell\\{verb_key}\\command",
+            f"{cls}\\{ext}\\shell\\{verb_key}",
+            f"{cls}\\{progid}\\shell\\open\\command",
+            f"{cls}\\{progid}\\shell\\open",
+            f"{cls}\\{progid}\\shell",
+            f"{cls}\\{progid}\\DefaultIcon",
+            f"{cls}\\{progid}",
         ):
             _del_key(hive, p)
-        _del_value(hive, f"{cls}\\Applications\\Twrp.exe\\SupportedTypes", ".img")
+        _del_value(hive, f"{cls}\\Applications\\Twrp.exe\\SupportedTypes", ext)
         for p in (
             f"{cls}\\Applications\\Twrp.exe\\shell\\open\\command",
             f"{cls}\\Applications\\Twrp.exe\\shell\\open",
@@ -344,19 +364,55 @@ def unregister_img_handler():
         try:
             with winreg.OpenKey(hive, f"{cls}\\Applications\\Twrp.exe") as k:
                 _v, _t = winreg.QueryValueEx(k, "")
-            if _v == IMG_DESC:
+            if _v in (IMG_DESC, VHDX_DESC, APP_DESC):
                 _del_key(hive, f"{cls}\\Applications\\Twrp.exe\\SupportedTypes")
                 _del_key(hive, f"{cls}\\Applications\\Twrp.exe")
         except OSError:
             pass
 
-    print(f"  [unregistered] {IMG_DESC} (.img Open with) - {removed} entrie(s) removed",
+    print(f"  [unregistered] {desc} ({ext} Open with) - {removed} entrie(s) removed",
           flush=True)
     try:
         ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x1000, None, None)
     except Exception:
         pass
     return 0
+
+
+def register_img_handler(command=None):
+    """Add ".img -> Open with -> WSA IMG Manager" plus a classic right-click verb."""
+    return _register_handler(".img", IMG_PROGID, IMG_VERB_KEY, IMG_VERB_TEXT,
+                             IMG_DESC, img_open_command(command), _img_icon_path())
+
+
+def unregister_img_handler():
+    """Remove exactly the keys register_img_handler() wrote (idempotent)."""
+    return _unregister_handler(".img", IMG_PROGID, IMG_VERB_KEY, IMG_DESC)
+
+
+def register_vhdx_handler(command=None):
+    """Add ".vhdx -> Open with -> WSA VHDX Manager" plus a right-click verb."""
+    return _register_handler(".vhdx", VHDX_PROGID, VHDX_VERB_KEY, VHDX_VERB_TEXT,
+                             VHDX_DESC, vhdx_open_command(command), _img_icon_path())
+
+
+def unregister_vhdx_handler():
+    """Remove exactly the keys register_vhdx_handler() wrote (idempotent)."""
+    return _unregister_handler(".vhdx", VHDX_PROGID, VHDX_VERB_KEY, VHDX_DESC)
+
+
+def register_handlers(command=None):
+    """Register BOTH .img and .vhdx Open-with handlers (the --register flag)."""
+    rc = register_img_handler(command)
+    rc |= register_vhdx_handler(command)
+    return rc
+
+
+def unregister_handlers():
+    """Remove BOTH .img and .vhdx Open-with handlers (the --unregister flag)."""
+    rc = unregister_img_handler()
+    rc |= unregister_vhdx_handler()
+    return rc
 
 
 POSTFSDATA_ARCNAME = "overlay.d/sbin/post-fs-data.sh"
@@ -3794,10 +3850,102 @@ def vhdx_ls(args):
         disk.close()
 
 
+def _extract_dir_to_host(fs, src, dst):
+    """Recursively extract image directory `src` to host folder `dst`."""
+    os.makedirs(dst, exist_ok=True)
+    base = src.rstrip("/") or ""
+    count = 0
+    for dirpath, _dirs, files in fs.walk(src):
+        rel = dirpath[len(base):].strip("/") if base else ""
+        out_dir = os.path.join(dst, rel) if rel else dst
+        os.makedirs(out_dir, exist_ok=True)
+        for fn in files:
+            data = fs.read_file(fs._ipath(dirpath, fn))
+            with open(os.path.join(out_dir, fn), "wb") as f:
+                f.write(data)
+            count += 1
+    return count
+
+
+def _extract_tree_to_zip(fs, src, zip_path):
+    """Zip image path `src` (a file or a whole subtree) into host `zip_path`."""
+    count = 0
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        st = fs.stat(src)
+        if st and st["is_reg"]:
+            zf.writestr(src.lstrip("/"), fs.read_file(src))
+            return 1
+        for dirpath, _dirs, files in fs.walk(src or "/"):
+            for fn in files:
+                full = fs._ipath(dirpath, fn)
+                zf.writestr(full.lstrip("/"), fs.read_file(full))
+                count += 1
+    return count
+
+
+def _ensure_dir(fs, path):
+    """Create every missing ancestor directory of `path` inside the image."""
+    parts = [p for p in path.replace("\\", "/").split("/") if p]
+    cur = ""
+    for part in parts:
+        cur = f"{cur}/{part}"
+        st = fs.stat(cur)
+        if st is None:
+            fs.mkdir(cur)
+        elif not st["is_dir"]:
+            raise Ext4Error(f"not a directory in path: {cur}")
+
+
 def vhdx_extract(args):
     _debug(f"vhdx_extract({args})")
+    if len(args) < 1:
+        print("usage: --vhdx-extract VHDX [SRC] [DST]   "
+              "(SRC omitted or / = whole disk -> folder)")
+        return 2
+    vhdx = args[0]
+    if len(args) == 1:
+        src, dst = "/", None
+    elif len(args) == 2:
+        src, dst = args[1], None
+    else:
+        src, dst = args[1], args[2]
+    disk, fs = _vhdx_open(vhdx)
+    try:
+        if src in ("/", ""):
+            if dst is None:
+                dst = os.path.splitext(
+                    os.path.basename(vhdx.rstrip("/\\")))[0] or "extracted"
+            count = _extract_dir_to_host(fs, "/", dst)
+            _log(f"Extracted whole disk -> {dst} ({count} files)")
+            return 0
+        st = fs.stat(src)
+        if st is None:
+            print(f"not found in image: {src}")
+            return 1
+        if st["is_reg"]:
+            if dst is None:
+                dst = os.path.basename(src.rstrip("/")) or "extracted.bin"
+            data = fs.read_file(src)
+            with open(dst, "wb") as f:
+                f.write(data)
+            _log(f"Extracted {src} -> {dst} ({len(data)} bytes)")
+            return 0
+        if st["is_dir"]:
+            if dst is None:
+                dst = os.path.basename(src.rstrip("/")) or "extracted"
+            count = _extract_dir_to_host(fs, src, dst)
+            _log(f"Extracted {count} files from {src} -> {dst}")
+            return 0
+        print(f"unsupported type: {src}")
+        return 1
+    finally:
+        disk.close()
+
+
+def vhdx_extract_file(args):
+    _debug(f"vhdx_extract_file({args})")
     if len(args) < 2:
-        print("usage: --vhdx-extract VHDX SRC [DST]")
+        print("usage: --vhdx-extract-file VHDX SRC [DST]")
         return 2
     vhdx, src = args[0], args[1]
     disk, fs = _vhdx_open(vhdx)
@@ -3806,33 +3954,85 @@ def vhdx_extract(args):
         if st is None:
             print(f"not found in image: {src}")
             return 1
-        if st["is_reg"]:
-            dst = args[2] if len(args) > 2 else os.path.basename(
-                src.rstrip("/")) or "extracted.bin"
-            data = fs.read_file(src)
-            with open(dst, "wb") as f:
-                f.write(data)
-            _log(f"Extracted {src} -> {dst} ({len(data)} bytes)")
-            return 0
-        if st["is_dir"]:
-            dst = args[2] if len(args) > 2 else (
-                os.path.basename(src.rstrip("/")) or "extracted")
-            os.makedirs(dst, exist_ok=True)
-            base = src.rstrip("/") or ""
-            count = 0
-            for dirpath, dirs, files in fs.walk(src):
-                rel = dirpath[len(base):].strip("/") if base else ""
-                out_dir = os.path.join(dst, rel) if rel else dst
-                os.makedirs(out_dir, exist_ok=True)
-                for fn in files:
-                    data = fs.read_file(fs._ipath(dirpath, fn))
-                    with open(os.path.join(out_dir, fn), "wb") as f:
-                        f.write(data)
-                    count += 1
-            _log(f"Extracted {count} files from {src} -> {dst}")
-            return 0
-        print(f"unsupported type: {src}")
-        return 1
+        if not st["is_reg"]:
+            print(f"not a regular file: {src}")
+            return 1
+        dst = args[2] if len(args) > 2 else (
+            os.path.basename(src.rstrip("/")) or "extracted.bin")
+        data = fs.read_file(src)
+        with open(dst, "wb") as f:
+            f.write(data)
+        _log(f"Extracted {src} -> {dst} ({len(data)} bytes)")
+        return 0
+    finally:
+        disk.close()
+
+
+def vhdx_extract_dir(args):
+    _debug(f"vhdx_extract_dir({args})")
+    if len(args) < 2:
+        print("usage: --vhdx-extract-dir VHDX SRC [DST]")
+        return 2
+    vhdx, src = args[0], args[1]
+    disk, fs = _vhdx_open(vhdx)
+    try:
+        st = fs.stat(src)
+        if st is None:
+            print(f"not found in image: {src}")
+            return 1
+        if not st["is_dir"]:
+            print(f"not a directory: {src}")
+            return 1
+        dst = args[2] if len(args) > 2 else (
+            os.path.basename(src.rstrip("/")) or "extracted")
+        count = _extract_dir_to_host(fs, src, dst)
+        _log(f"Extracted {count} files from {src} -> {dst}")
+        return 0
+    finally:
+        disk.close()
+
+
+def vhdx_zip(args):
+    _debug(f"vhdx_zip({args})")
+    if len(args) < 2:
+        print("usage: --vhdx-zip VHDX [SRC] DST   "
+              "(SRC omitted or / = whole disk; DST ends in .zip)")
+        return 2
+    vhdx = args[0]
+    if len(args) >= 3:
+        src, dst = args[1], args[2]
+    else:
+        src, dst = "/", args[1]
+    disk, fs = _vhdx_open(vhdx)
+    try:
+        st = fs.stat(src)
+        if st is None:
+            print(f"not found in image: {src}")
+            return 1
+        count = _extract_tree_to_zip(fs, src, dst)
+        _log(f"Zipped {count} file(s) from {src} -> {dst}")
+        return 0
+    finally:
+        disk.close()
+
+
+def vhdx_tree(args):
+    _debug(f"vhdx_tree({args})")
+    vhdx = args[0]
+    target = args[1] if len(args) > 1 else "/"
+    disk, fs = _vhdx_open(vhdx)
+    try:
+        def _walk(path, depth):
+            for name, ino, ftype in fs.listdir(path):
+                if name in (".", ".."):
+                    continue
+                kind = {Ext4Fs.FT_DIR: "d", Ext4Fs.FT_SYMLINK: "l"}.get(ftype, "-")
+                full = fs._ipath(path, name)
+                print(f"{'  ' * depth}{kind} {ino:>8} {full}")
+                if ftype == Ext4Fs.FT_DIR:
+                    _walk(full, depth + 1)
+        _walk(target, 0)
+        return 0
     finally:
         disk.close()
 
@@ -3857,6 +4057,62 @@ def vhdx_put(args):
         fs.write_file(dest, data)
         fs.commit()
         _log(f"Written {len(data)} bytes -> {dest}")
+        return 0
+    finally:
+        disk.close()
+
+
+def vhdx_put_folder(args):
+    _debug(f"vhdx_put_folder({args})")
+    if len(args) < 2:
+        print("usage: --vhdx-put-folder VHDX LOCALDIR [DESTDIR]")
+        return 2
+    vhdx, localdir = args[0], args[1]
+    destdir = args[2] if len(args) > 2 else "/"
+    if not os.path.isdir(localdir):
+        print(f"local directory not found: {localdir}")
+        return 1
+    destdir = destdir.replace("\\", "/").rstrip("/")
+    _vhdx_backup_once(vhdx)
+    disk, fs = _vhdx_open(vhdx, writable=True)
+    try:
+        count = 0
+        for dirpath, _dirs, files in os.walk(localdir):
+            rel = os.path.relpath(dirpath, localdir)
+            parts = [p for p in rel.split(os.sep) if p not in (".", "")]
+            img_dir = destdir
+            for part in parts:
+                img_dir = f"{img_dir}/{part}" if img_dir else f"/{part}"
+            if img_dir:
+                _ensure_dir(fs, img_dir)
+            for fn in files:
+                dest = f"{img_dir}/{fn}" if img_dir else f"/{fn}"
+                with open(os.path.join(dirpath, fn), "rb") as f:
+                    data = f.read()
+                fs.write_file(dest, data)
+                count += 1
+        fs.commit()
+        _log(f"Injected {count} file(s) from {localdir} -> {destdir or '/'}")
+        return 0
+    finally:
+        disk.close()
+
+
+def vhdx_mkdir(args):
+    _debug(f"vhdx_mkdir({args})")
+    if len(args) != 2:
+        print("usage: --vhdx-mkdir VHDX DIR")
+        return 2
+    vhdx, target = args
+    _vhdx_backup_once(vhdx)
+    disk, fs = _vhdx_open(vhdx, writable=True)
+    try:
+        if fs.stat(target) is not None:
+            print(f"already exists: {target}")
+            return 1
+        _ensure_dir(fs, target)
+        fs.commit()
+        _log(f"Created directory {target}")
         return 0
     finally:
         disk.close()
@@ -7809,6 +8065,689 @@ class ImgManagerWindow(QWidget):
         shutil.rmtree(self._stage_dir, ignore_errors=True)
 
 
+class VhdxManagerWindow(ImgManagerWindow):
+    """7-Zip style manager for a WSA VHDX partition image (ext4 inside VHDX).
+
+    Reuses ImgManagerWindow's frameless shell, toolbar chrome, staged-edit +
+    atomic-Apply flow and undo/redo (snapshot-based), but the data layer is
+    Ext4Fs on a temp copy of the VHDX. Directories load lazily on expand so a
+    128 GiB userdata image stays browsable. Opens read-only (browser only,
+    Apply + all writes disabled) when the write gate blocks the image.
+    """
+
+    # staged snapshots are whole VHDX copies - keep the stack short
+    MAX_HISTORY = 8
+
+    _ACTIONS = (
+        ("extract", "Extract"),
+        ("delete", "Delete"),
+        ("rename", "Rename"),
+        ("overwrite", "Overwrite"),
+        ("add_file", "Add File"),
+        ("add_folder", "Add Folder"),
+        ("new_folder", "New Folder"),
+        ("refresh", "Refresh"),
+    )
+
+    _CLI_ACTIONS = (
+        ("info", "Info"),
+        ("put_file", "Put file\u2026"),
+        ("put_folder", "Put folder\u2026"),
+        ("extract_file", "Extract file\u2026"),
+        ("extract_dir", "Extract dir\u2026"),
+        ("extract_all", "Extract all (zip)\u2026"),
+        ("register", "Register .vhdx"),
+    )
+
+    _MUTATING = ("extract", "delete", "rename", "overwrite",
+                 "add_file", "add_folder", "new_folder")
+
+    def __init__(self, vhdx_path, source_path=None):
+        # deliberately NOT ImgManagerWindow.__init__ (that builds an
+        # InitrdManager); we set up an Ext4Fs-backed staging area instead.
+        QWidget.__init__(self)
+        self._real_path = vhdx_path
+        self._stage_dir = tempfile.mkdtemp(prefix="vhdxmgr_")
+        self._path = os.path.join(
+            self._stage_dir, os.path.basename(vhdx_path) or "disk.vhdx")
+        shutil.copy2(source_path or vhdx_path, self._path)
+        self._disk = None
+        self._fs = None
+        self._open_fs()
+        self._writable = bool(self._fs and self._fs.writable)
+        self._entries = {}
+        self._last_action = ""
+        self._dirty = False
+        self._drag_offset = None
+        self._hover = None
+        self._close_rect = self._max_rect = self._min_rect = None
+        self._grip = None
+        self._undo_btn = self._redo_btn = None
+        self._restore_btn = self._btn_backup = self._apply_btn = None
+        self._hist_dir = os.path.join(self._stage_dir, "history")
+        os.makedirs(self._hist_dir, exist_ok=True)
+        self._hist = []
+        self._hist_seq = 0
+        self._hpos = -1
+        self._real_hash = self._file_hash(vhdx_path)
+        ro = "" if self._writable else "  [read-only]"
+        self._base_title = f"VHDX Manager  \u2014  {os.path.basename(vhdx_path)}{ro}"
+        self._title_text = self._base_title
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setMouseTracking(True)
+        self.setMinimumSize(860, 480)
+        self.resize(self.W, self.H)
+        self._build_layout()
+        if self._writable:
+            self._push_snapshot()
+        self._reload()
+        self._refresh_buttons()
+
+    # ------------------------------------------------------------- fs layer
+
+    def _open_fs(self):
+        if self._disk is not None:
+            try:
+                self._disk.close()
+            except Exception:
+                pass
+        self._disk, self._fs = _vhdx_open(self._path, writable=True)
+        if not self._fs.writable:
+            try:
+                self._disk.close()
+            except Exception:
+                pass
+            self._disk, self._fs = _vhdx_open(self._path, writable=False)
+
+    def _can_write(self):
+        if self._writable:
+            return True
+        self._err("This image cannot be edited.\n\n"
+                  "The write gate is closed: the filesystem is not cleanly "
+                  "unmounted, or has metadata checksums / 64-bit features.")
+        return False
+
+    @staticmethod
+    def _mode_for(ftype):
+        if ftype == Ext4Fs.FT_DIR:
+            return 0o040755
+        if ftype == Ext4Fs.FT_SYMLINK:
+            return 0o120777
+        return 0o100644
+
+    # ----------------------------------------------------------- build layout
+
+    def _build_layout(self):
+        self._update_control_rects()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, self.HDR_H + 10, 14, 6)
+        outer.setSpacing(6)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        for key, label in self._ACTIONS:
+            btn = QPushButton(label)
+            btn.setFixedHeight(28)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFocusPolicy(Qt.NoFocus)
+            btn.setStyleSheet(self._BTN_STYLE)
+            btn.clicked.connect(lambda _checked=False, k=key: self._on_action(k))
+            if key in self._MUTATING:
+                btn.setEnabled(self._writable)
+                if not self._writable:
+                    btn.setToolTip("Read-only image \u2014 writes are disabled")
+            row.addWidget(btn)
+        row.addStretch(1)
+
+        self._undo_btn = QPushButton("Undo")
+        self._undo_btn.setFixedHeight(28)
+        self._undo_btn.setCursor(Qt.PointingHandCursor)
+        self._undo_btn.setFocusPolicy(Qt.NoFocus)
+        self._undo_btn.setStyleSheet(self._BTN_STYLE)
+        self._undo_btn.clicked.connect(self._undo)
+        row.addWidget(self._undo_btn)
+
+        self._redo_btn = QPushButton("Redo")
+        self._redo_btn.setFixedHeight(28)
+        self._redo_btn.setCursor(Qt.PointingHandCursor)
+        self._redo_btn.setFocusPolicy(Qt.NoFocus)
+        self._redo_btn.setStyleSheet(self._BTN_STYLE)
+        self._redo_btn.clicked.connect(self._redo)
+        row.addWidget(self._redo_btn)
+        outer.addLayout(row)
+
+        # row 2 -- vhdx CLI actions
+        cli = dict(self._CLI_ACTIONS)
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        for key in ("info", "put_file", "put_folder"):
+            row2.addWidget(self._cli_button(cli[key], key))
+        row2.addStretch(1)
+        for key in ("extract_file", "extract_dir", "extract_all", "register"):
+            row2.addWidget(self._cli_button(cli[key], key))
+        outer.addLayout(row2)
+
+        self._tree = QTreeWidget()
+        self._tree.setColumnCount(5)
+        self._tree.setHeaderLabels(["Name", "Size", "Type", "Mode", "Path"])
+        self._tree.setRootIsDecorated(True)
+        self._tree.setAlternatingRowColors(True)
+        self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._tree.setUniformRowHeights(True)
+        self._tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._tree.setExpandsOnDoubleClick(True)
+        self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_context_menu)
+        self._tree.itemSelectionChanged.connect(self._on_selection_changed)
+        self._tree.itemDoubleClicked.connect(self._on_double_click)
+        self._tree.itemExpanded.connect(self._on_item_expanded)
+        self._tree.setStyleSheet(self._TREE_STYLE)
+        hdr = self._tree.header()
+        hdr.setStretchLastSection(False)
+        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
+        for col in (1, 2, 3):
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.Interactive)
+        self._tree.setColumnWidth(4, 300)
+        outer.addWidget(self._tree, 1)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(6)
+
+        self._restore_btn = QPushButton("Restore\u2026")
+        self._restore_btn.setFixedHeight(28)
+        self._restore_btn.setCursor(Qt.PointingHandCursor)
+        self._restore_btn.setFocusPolicy(Qt.NoFocus)
+        self._restore_btn.setStyleSheet(self._BTN_STYLE)
+        self._restore_btn.clicked.connect(self._act_restore)
+        bottom.addWidget(self._restore_btn)
+
+        self._btn_backup = QPushButton("Backup")
+        self._btn_backup.setFixedHeight(28)
+        self._btn_backup.setCursor(Qt.PointingHandCursor)
+        self._btn_backup.setFocusPolicy(Qt.NoFocus)
+        self._btn_backup.clicked.connect(self._act_backup)
+        bottom.addWidget(self._btn_backup)
+
+        self._apply_btn = QPushButton("Apply")
+        self._apply_btn.setFixedHeight(28)
+        self._apply_btn.setCursor(Qt.PointingHandCursor)
+        self._apply_btn.setFocusPolicy(Qt.NoFocus)
+        self._apply_btn.setStyleSheet(self._BTN_APPLY)
+        self._apply_btn.clicked.connect(self._act_apply)
+        if not self._writable:
+            self._apply_btn.setEnabled(False)
+            self._apply_btn.setToolTip("Read-only image \u2014 cannot apply")
+        bottom.addWidget(self._apply_btn)
+
+        bottom.addStretch(1)
+
+        self._warn = QLabel(
+            "Staged edits only \u2014 nothing touches the live image until "
+            "you press Apply.")
+        self._warn.setFixedHeight(16)
+        self._warn.setStyleSheet("color: #e0a030; font-size: 11px;")
+        bottom.addWidget(self._warn)
+        outer.addLayout(bottom)
+
+        self._status = QLabel("")
+        self._status.setFixedHeight(16)
+        self._status.setStyleSheet("color: #8a93a6; font-size: 11px;")
+        outer.addWidget(self._status)
+
+        self._grip = QSizeGrip(self)
+
+    # ----------------------------------------------------------- lazy tree
+
+    def _reload(self):
+        try:
+            root = self._fs.listdir("/")
+        except Exception as exc:
+            self._entries = {}
+            self._tree.clear()
+            self._last_action = f"cannot read image: {exc}"
+            self._update_status()
+            return
+        self._entries = {}
+        self._tree.setUpdatesEnabled(False)
+        self._tree.setSortingEnabled(False)
+        self._tree.clear()
+        self._fill_dir("", self._tree.invisibleRootItem(), root)
+        self._tree.setSortingEnabled(True)
+        self._tree.setUpdatesEnabled(True)
+        self._update_status()
+
+    def _fill_dir(self, parent_path, parent_item, entries):
+        def sort_key(e):
+            _name, _ino, ftype = e
+            return (0 if ftype == Ext4Fs.FT_DIR else 1, e[0].lower())
+        for name, _ino, ftype in sorted(entries, key=sort_key):
+            if name in (".", ".."):
+                continue
+            full = self._fs._ipath(parent_path, name)
+            mode = self._mode_for(ftype)
+            is_dir = ftype == Ext4Fs.FT_DIR
+            item = QTreeWidgetItem([
+                name, "", self._kind_label(mode),
+                "\u2014" if is_dir else self._mode_label(mode), full])
+            item.setData(0, Qt.UserRole, {
+                "name": full, "mode": mode, "dir": is_dir, "filled": False})
+            parent_item.addChild(item)
+            self._entries[full] = (mode, 0)
+            if is_dir:
+                placeholder = QTreeWidgetItem(["Loading\u2026", "", "", "", ""])
+                placeholder.setData(0, Qt.UserRole, None)
+                item.addChild(placeholder)
+
+    def _on_item_expanded(self, item):
+        data = item.data(0, Qt.UserRole)
+        if not data or data.get("filled") or not data.get("dir"):
+            return
+        path = data["name"]
+        try:
+            entries = self._fs.listdir(path)
+        except Exception:
+            item.setChildCount(0)
+            data["filled"] = True
+            item.setData(0, Qt.UserRole, data)
+            return
+        item.takeChildren()
+        self._fill_dir(path, item, entries)
+        data["filled"] = True
+        item.setData(0, Qt.UserRole, data)
+
+    # --------------------------------------------------- overridden helpers
+
+    def _info(self, text):
+        QMessageBox.information(self, "VHDX Manager", text)
+
+    def _err(self, text):
+        QMessageBox.warning(self, "VHDX Manager", text)
+
+    def _confirm(self, text):
+        return QMessageBox.question(
+            self, "VHDX Manager", text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
+
+    def _load_snapshot(self, path):
+        if self._disk is not None:
+            try:
+                self._disk.close()
+            except Exception:
+                pass
+        shutil.copy2(path, self._path)
+        self._open_fs()
+        self._reload()
+        self._after_history_change()
+
+    def _act_restore(self):
+        found = self._backup_files()
+        if not found:
+            self._info("No backups exist yet \u2014 press Backup first.")
+            return
+        folder = os.path.dirname(self._real_path) or "."
+        name, ok = QInputDialog.getItem(
+            self, "Restore backup", "Backup:", found, 0, False)
+        if not ok or not name:
+            return
+        src = os.path.join(folder, name)
+        if not self._confirm(
+                f"Replace the staged image with\n{name}?\n"
+                "The live image is not touched until you press Apply."):
+            return
+        if self._disk is not None:
+            try:
+                self._disk.close()
+            except Exception:
+                pass
+        try:
+            shutil.copy2(src, self._path)
+        except Exception as exc:
+            self._err(f"Restore failed:\n{exc}")
+            return
+        self._open_fs()
+        self._writable = bool(self._fs and self._fs.writable)
+        self._reset_history()
+        if self._writable:
+            self._push_snapshot()
+        self._last_action = f"restored {name} into staging"
+        self._reload()
+        self._refresh_buttons()
+        self._info(f"Staged image replaced with:\n{src}")
+
+    def _act_open(self):
+        info = self._single_selection()
+        if info is None:
+            self._info("Select exactly one file entry to open.")
+            return
+        name, _mode, is_dir = info
+        if is_dir:
+            return
+        try:
+            data = self._fs.read_file(name)
+        except Exception as exc:
+            self._err(f"Cannot read {name}:\n{exc}")
+            return
+        try:
+            text = data.decode("utf-8")
+            preview = text[:8000]
+        except UnicodeDecodeError:
+            preview = "Binary file (hex head):\n" + data[:256].hex(" ")
+        InfoDialog(f"{name}  ({len(data)} bytes)", preview).exec()
+
+    # -------------------------------------------------------------- actions
+
+    def _require_sel(self, what):
+        names = self._selected()
+        if not names:
+            self._info(f"Select one or more entries to {what}.")
+            return None
+        return names
+
+    def _act_extract(self):
+        names = self._require_sel("extract")
+        if not names:
+            return
+        dest = QFileDialog.getExistingDirectory(self, "Extract to folder")
+        if not dest:
+            return
+        for n in names:
+            st = self._fs.stat(n)
+            if st is None:
+                continue
+            out = os.path.join(dest, os.path.basename(n.rstrip("/")) or "item")
+            try:
+                if st["is_dir"]:
+                    _extract_dir_to_host(self._fs, n, out)
+                else:
+                    with open(out, "wb") as f:
+                        f.write(self._fs.read_file(n))
+            except Exception as exc:
+                self._err(f"Extract {n} failed:\n{exc}")
+        self._last_action = f"extracted {len(names)} item(s)"
+        self._update_status()
+
+    def _act_delete(self):
+        names = self._require_sel("delete")
+        if not names or not self._can_write():
+            return
+        if not self._confirm(f"Delete {len(names)} selected item(s) "
+                             "from the staged image?"):
+            return
+
+        def do():
+            for n in names:
+                st = self._fs.stat(n)
+                if st is None:
+                    continue
+                if st["is_dir"]:
+                    self._fs.rmdir(n)
+                else:
+                    self._fs.unlink(n)
+            self._fs.commit()
+        self._commit_op(f"deleted {len(names)} item(s)", do)
+
+    def _act_rename(self):
+        info = self._single_selection()
+        if info is None or not self._can_write():
+            return
+        name, _mode, is_dir = info
+        if is_dir:
+            self._info("Folder rename is not supported yet \u2014 "
+                       "extract and re-add the folder instead.")
+            return
+        base = name.rpartition("/")[2]
+        parent = name.rpartition("/")[0]
+        new, ok = QInputDialog.getText(self, "Rename", "New name:",
+                                       QLineEdit.EchoMode.Normal, base)
+        if not ok or not self._valid_name(new):
+            return
+        dest = f"{parent}/{new}" if parent else f"/{new}"
+
+        def do():
+            data = self._fs.read_file(name)
+            self._fs.write_file(dest, data)
+            self._fs.unlink(name)
+            self._fs.commit()
+        self._commit_op(f"renamed {base} -> {new}", do)
+
+    def _act_overwrite(self):
+        names = self._require_sel("overwrite")
+        if not names or not self._can_write():
+            return
+        if len(names) != 1:
+            self._info("Select exactly one file to overwrite.")
+            return
+        target = names[0]
+        host, _ = QFileDialog.getOpenFileName(
+            self, "File to write over the selection", "", "All files (*.*)")
+        if not host:
+            return
+        with open(host, "rb") as f:
+            data = f.read()
+
+        def do():
+            self._fs.write_file(target, data)
+            self._fs.commit()
+        self._commit_op(f"overwrote {target} ({len(data)} bytes)", do)
+
+    def _dest_for_add(self):
+        info = self._single_selection()
+        if info is None:
+            return "/"
+        name, _mode, is_dir = info
+        return name if is_dir else (name.rpartition("/")[0] or "/")
+
+    def _act_add_file(self):
+        dest_dir = self._dest_for_add()
+        if not self._can_write():
+            return
+        host, _ = QFileDialog.getOpenFileName(
+            self, f"Add file to {dest_dir}", "", "All files (*.*)")
+        if not host:
+            return
+        with open(host, "rb") as f:
+            data = f.read()
+        dest = f"{dest_dir.rstrip('/')}/{os.path.basename(host)}"
+
+        def do():
+            _ensure_dir(self._fs, dest_dir)
+            self._fs.write_file(dest, data)
+            self._fs.commit()
+        self._commit_op(f"added {os.path.basename(host)} -> {dest}", do)
+
+    def _act_add_folder(self):
+        dest_dir = self._dest_for_add()
+        if not self._can_write():
+            return
+        host = QFileDialog.getExistingDirectory(self, f"Folder to add to {dest_dir}")
+        if not host:
+            return
+        root_name = os.path.basename(host.rstrip("\\/"))
+        target_base = f"{dest_dir.rstrip('/')}/{root_name}"
+
+        def do():
+            _ensure_dir(self._fs, target_base)
+            for dirpath, _dirs, files in os.walk(host):
+                rel = os.path.relpath(dirpath, host)
+                parts = [p for p in rel.split(os.sep) if p not in (".", "")]
+                img_dir = target_base
+                for part in parts:
+                    img_dir = f"{img_dir}/{part}"
+                _ensure_dir(self._fs, img_dir)
+                for fn in files:
+                    with open(os.path.join(dirpath, fn), "rb") as f:
+                        self._fs.write_file(f"{img_dir}/{fn}", f.read())
+            self._fs.commit()
+        self._commit_op(f"added folder {root_name} -> {target_base}", do)
+
+    def _act_new_folder(self):
+        dest_dir = self._dest_for_add()
+        if not self._can_write():
+            return
+        name, ok = QInputDialog.getText(self, "New folder", "Name:")
+        if not ok or not self._valid_name(name):
+            return
+        path = f"{dest_dir.rstrip('/')}/{name}"
+
+        def do():
+            _ensure_dir(self._fs, path)
+            self._fs.commit()
+        self._commit_op(f"created folder {path}", do)
+
+    # ---------------------------------------------------------- CLI actions
+
+    def _cli_info(self):
+        info = self._disk.info()
+        lines = [
+            f"path          : {self._real_path}",
+            f"file size     : {info['file_size']}",
+            f"virtual size  : {info['virtual_size']}",
+            f"ext4 base     : 0x{info['ext4_base']:x}",
+            f"block size    : {self._fs.block_size}",
+            f"blocks        : {self._fs.blocks_count} (free {self._fs.free_blocks})",
+            f"inodes        : {self._fs.inodes_count} (free {self._fs.free_inodes})",
+            f"state         : {self._fs.state} "
+            f"({'clean' if self._fs.state == 1 else 'dirty'})",
+            f"editable      : {'yes' if self._writable else 'no (read-only)'}",
+        ]
+        InfoDialog("VHDX Info", "\n".join(lines)).exec()
+
+    def _cli_put_file(self):
+        if not self._can_write():
+            return
+        host, _ = QFileDialog.getOpenFileName(
+            self, "File to inject", "", "All files (*.*)")
+        if not host:
+            return
+        dest, ok = QInputDialog.getText(
+            self, "Destination in image", "Path (e.g. /system/app/x.apk):")
+        if not ok or not dest:
+            return
+        with open(host, "rb") as f:
+            data = f.read()
+        dest = dest.replace("\\", "/")
+        if dest.endswith("/"):
+            dest = dest + os.path.basename(host)
+
+        def do():
+            _ensure_dir(self._fs, dest.rpartition("/")[0] or "/")
+            self._fs.write_file(dest, data)
+            self._fs.commit()
+        self._commit_op(f"put {os.path.basename(host)} -> {dest}", do)
+
+    def _cli_put_folder(self):
+        if not self._can_write():
+            return
+        host = QFileDialog.getExistingDirectory(self, "Folder to inject")
+        if not host:
+            return
+        dest, ok = QInputDialog.getText(
+            self, "Destination in image", "Directory (e.g. /system):",
+            QLineEdit.EchoMode.Normal, "/")
+        if not ok or not dest:
+            return
+        dest = dest.replace("\\", "/").rstrip("/")
+
+        def do():
+            for dirpath, _dirs, files in os.walk(host):
+                rel = os.path.relpath(dirpath, host)
+                parts = [p for p in rel.split(os.sep) if p not in (".", "")]
+                img_dir = dest
+                for part in parts:
+                    img_dir = f"{img_dir}/{part}" if img_dir else f"/{part}"
+                if img_dir:
+                    _ensure_dir(self._fs, img_dir)
+                for fn in files:
+                    with open(os.path.join(dirpath, fn), "rb") as f:
+                        self._fs.write_file(
+                            f"{img_dir}/{fn}" if img_dir else f"/{fn}", f.read())
+            self._fs.commit()
+        self._commit_op(f"injected folder {os.path.basename(host)} -> {dest or '/'}",
+                        do)
+
+    def _cli_extract_file(self):
+        names = self._selected()
+        name = names[0] if names else None
+        if name is None or self._fs.stat(name) is None or self._fs.stat(name)["is_dir"]:
+            name, ok = QInputDialog.getText(self, "Extract file", "Path in image:")
+            if not ok or not name:
+                return
+        st = self._fs.stat(name)
+        if st is None or not st["is_reg"]:
+            self._err(f"Not a file in the image: {name}")
+            return
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Save file", os.path.basename(name.rstrip("/")))
+        if not dest:
+            return
+        with open(dest, "wb") as f:
+            f.write(self._fs.read_file(name))
+        self._last_action = f"extracted {name}"
+        self._update_status()
+        self._info(f"Extracted:\n{name} -> {dest}")
+
+    def _cli_extract_dir(self):
+        names = self._selected()
+        name = names[0] if names else None
+        if name is None or self._fs.stat(name) is None or not self._fs.stat(name)["is_dir"]:
+            name, ok = QInputDialog.getText(self, "Extract dir", "Path in image:",
+                                            QLineEdit.EchoMode.Normal, "/")
+            if not ok or not name:
+                return
+        st = self._fs.stat(name)
+        if st is None or not st["is_dir"]:
+            self._err(f"Not a directory in the image: {name}")
+            return
+        dest = QFileDialog.getExistingDirectory(self, "Extract to folder")
+        if not dest:
+            return
+        count = _extract_dir_to_host(self._fs, name, dest)
+        self._last_action = f"extracted {count} files from {name}"
+        self._update_status()
+        self._info(f"Extracted {count} files from {name} -> {dest}")
+
+    def _cli_extract_all(self):
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Save whole disk as zip",
+            os.path.splitext(os.path.basename(self._real_path))[0] + ".zip",
+            "Zip archive (*.zip)")
+        if not dest:
+            return
+        count = _extract_tree_to_zip(self._fs, "/", dest)
+        self._last_action = f"zipped {count} files"
+        self._update_status()
+        self._info(f"Zipped {count} file(s) to:\n{dest}")
+
+    def _cli_register(self):
+        dlg = LogDialog("Register .vhdx handler", self)
+        dlg.run_printing(register_vhdx_handler, {})
+        dlg.show()
+
+    # ----------------------------------------------------------------- misc
+
+    def closeEvent(self, event):
+        if self._dirty:
+            answer = QMessageBox.question(
+                self, "VHDX Manager",
+                "You have staged edits that were never applied.\n"
+                "Discard them and close?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+        event.accept()
+        if self._disk is not None:
+            try:
+                self._disk.close()
+            except Exception:
+                pass
+        shutil.rmtree(self._stage_dir, ignore_errors=True)
+
+
 class WSATWRP:
 
     def __init__(self):
@@ -9421,6 +10360,60 @@ class WSATWRP:
         self._cleanup()
         return result
 
+    def manage_vhdx(self, vhdx_path=None):
+        """Open the VHDX Manager window.
+
+        Sole caller is the --vhdx-gui branch of main()."""
+        _debug(f"manage_vhdx({vhdx_path})")
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication(sys.argv)
+        app.setApplicationName(APP_NAME)
+        app.setStyle("Fusion")
+        path = vhdx_path
+        if path:
+            if not os.path.isfile(path):
+                QMessageBox.critical(None, APP_NAME, f"File not found:\n{path}")
+                return 1
+        else:
+            # auto-detect: the WSA install's VHDX set (first usable one)
+            for entry in WSADetector.vhdx_list():
+                cand = entry.get("path")
+                if cand and os.path.isfile(cand):
+                    path = cand
+                    _debug(f"manage_vhdx: auto-detected {path}")
+                    break
+            if not path:
+                path, _filter = QFileDialog.getOpenFileName(
+                    None, "Select a VHDX image", "",
+                    "VHDX images (*.vhdx);;All files (*.*)")
+                if not path:
+                    print("  No VHDX selected.", flush=True)
+                    return 1
+
+        # quick readability probe before building the window
+        try:
+            probe_disk = VhdxDisk(path)
+            probe_disk.close()
+        except Exception as exc:
+            QMessageBox.critical(None, APP_NAME,
+                                 f"Not a readable VHDX image:\n{path}\n\n{exc}")
+            return 1
+
+        _log(f"Opening VHDX Manager: {path}")
+        window = VhdxManagerWindow(path)
+        screen = app.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            window.move(
+                available.center().x() - window.width() // 2,
+                available.center().y() - window.height() // 2,
+            )
+        window.show()
+        result = app.exec()
+        self._cleanup()
+        return result
+
     def _flow_install_magisk_hook(self, log, window, target_initrd=None, force=False):
         is_wsa_img = False
         if target_initrd:
@@ -9751,18 +10744,29 @@ Examples:
   {CLI_NAME} --uninstall-twrp                              Remove TWRP files + clear both flags
   {CLI_NAME} --gui                                         Open the initrd.img file manager GUI
   {CLI_NAME} --gui --path C:\\initrd.img                   Manage a specific file
-  {CLI_NAME} --register-img                                Add .img -> Open with -> WSA IMG Manager
-  {CLI_NAME} --unregister-img                              Remove the .img Open with entries
+  {CLI_NAME} --register                                    Register .img + .vhdx -> Open with
+  {CLI_NAME} --unregister                                  Remove the Open with entries
+  {CLI_NAME} --vhdx-gui C:\\WSA\\system.vhdx               Open the VHDX file manager GUI
   {CLI_NAME} --vhdx-info C:\\WSA\\system.vhdx              Show VHDX container + ext4 info
   {CLI_NAME} --vhdx-ls C:\\WSA\\system.vhdx /system       List a directory inside the image
+  {CLI_NAME} --vhdx-tree C:\\WSA\\system.vhdx /system     Recursive directory listing
   {CLI_NAME} --vhdx-extract C:\\WSA\\system.vhdx /system/build.prop .  Extract a file
+  {CLI_NAME} --vhdx-extract C:\\WSA\\system.vhdx . C:\\out   Extract whole disk to a folder
+  {CLI_NAME} --vhdx-zip C:\\WSA\\system.vhdx C:\\sys.zip   Whole disk -> zip
   {CLI_NAME} --vhdx-put C:\\WSA\\system.vhdx app.apk /system/app/x.apk  Copy a file in
+  {CLI_NAME} --vhdx-put-folder C:\\WSA\\system.vhdx C:\\dir /system     Inject a folder
+  {CLI_NAME} --vhdx-mkdir C:\\WSA\\system.vhdx /system/app/newdir      Create a directory
   {CLI_NAME} --vhdx-rm C:\\WSA\\system.vhdx /system/app/x.apk  Remove a file/dir
         """)
     parser.add_argument("--status", action="store_true",
                         help="Check WSA and TWRP status")
     parser.add_argument("--gui", action="store_true",
                         help="Open the initrd.img file manager GUI (extract/delete/rename/overwrite)")
+    parser.add_argument("--vhdx-gui", nargs='?', const='', default=None,
+                        metavar="VHDX",
+                        help="Open the VHDX file manager GUI (browse a WSA *.vhdx ext4, "
+                             "extract/put/delete with staged Apply). Optional path; "
+                             "autodetects from the WSA install if omitted.")
     parser.add_argument("--disable-twrp", action="store_true",
                         help="Clear recovery flag (force normal boot)")
     parser.add_argument("--enable-twrp", action="store_true",
@@ -9810,22 +10814,41 @@ Examples:
     parser.add_argument("--uninstall-twrp", action="store_true",
                         help="Remove TWRP files and folders, set twrp_support=false "
                              "and recovery_flag=false")
-    parser.add_argument("--register-img", action="store_true",
-                        help="Register .img files -> Open with -> WSA IMG Manager (Explorer)")
-    parser.add_argument("--unregister-img", action="store_true",
-                        help="Remove the .img Open with / context-menu registration")
+    parser.add_argument("--register", "--register-img", action="store_true",
+                        dest="register",
+                        help="Register BOTH .img and .vhdx -> Open with "
+                             "(WSA IMG/VHDX Manager) in Explorer")
+    parser.add_argument("--unregister", "--unregister-img", action="store_true",
+                        dest="unregister",
+                        help="Remove the .img + .vhdx Open with / context-menu registration")
     parser.add_argument("--vhdx-info", nargs='+', default=None,
                         help="Show VHDX container + ext4 info: --vhdx-info VHDX [VHDX...] "
                              "(a directory scans all *.vhdx in it)")
     parser.add_argument("--vhdx-ls", nargs='+', default=None,
                         help="List a directory inside a VHDX ext4: --vhdx-ls VHDX [PATH]")
     parser.add_argument("--vhdx-extract", nargs='+', default=None,
-                        help="Extract a file/dir from a VHDX: --vhdx-extract VHDX SRC [DST]")
+                        help="Extract a file/dir (or whole disk) from a VHDX: "
+                             "--vhdx-extract VHDX [SRC] [DST] (SRC omitted or / "
+                             "= whole disk -> folder)")
+    parser.add_argument("--vhdx-extract-file", nargs='+', default=None,
+                        help="Extract a single file: --vhdx-extract-file VHDX SRC [DST]")
+    parser.add_argument("--vhdx-extract-dir", nargs='+', default=None,
+                        help="Extract a directory (recursive): --vhdx-extract-dir VHDX SRC [DST]")
+    parser.add_argument("--vhdx-zip", nargs='+', default=None,
+                        help="Export a file/dir (or whole disk) as a .zip: "
+                             "--vhdx-zip VHDX [SRC] DST")
+    parser.add_argument("--vhdx-tree", nargs='+', default=None,
+                        help="Recursive directory listing: --vhdx-tree VHDX [PATH]")
     parser.add_argument("--vhdx-put", nargs='+', default=None,
                         help="Copy a host file into a VHDX ext4: --vhdx-put VHDX LOCAL DEST "
                              "(DEST may end with / to keep the local basename; "
                              "image must be cleanly unmounted, no metadata checksums; "
                              "creates VHDX.preedit.bak once before the first write)")
+    parser.add_argument("--vhdx-put-folder", nargs='+', default=None,
+                        help="Inject a host folder (recursive) into a VHDX: "
+                             "--vhdx-put-folder VHDX LOCALDIR [DESTDIR]")
+    parser.add_argument("--vhdx-mkdir", nargs='+', default=None,
+                        help="Create a directory in a VHDX: --vhdx-mkdir VHDX DIR")
     parser.add_argument("--vhdx-rm", nargs='+', default=None,
                         help="Remove a file/empty dir from a VHDX ext4: --vhdx-rm VHDX PATH "
                              "(same write constraints as --vhdx-put)")
@@ -9844,13 +10867,13 @@ Examples:
     mode = "admin" if args.admin else ("user" if args.user else None)
     _debug(f"mode: {mode or 'default'}")
 
-    if args.register_img:
-        _debug("Command: --register-img")
-        sys.exit(register_img_handler())
+    if args.register:
+        _debug("Command: --register")
+        sys.exit(register_handlers())
 
-    if args.unregister_img:
-        _debug("Command: --unregister-img")
-        sys.exit(unregister_img_handler())
+    if args.unregister:
+        _debug("Command: --unregister")
+        sys.exit(unregister_handlers())
 
     if args.vhdx_info is not None:
         _debug("Command: --vhdx-info")
@@ -9860,17 +10883,47 @@ Examples:
         _debug("Command: --vhdx-ls")
         sys.exit(vhdx_ls(args.vhdx_ls))
 
+    if args.vhdx_tree is not None:
+        _debug("Command: --vhdx-tree")
+        sys.exit(vhdx_tree(args.vhdx_tree))
+
     if args.vhdx_extract is not None:
         _debug("Command: --vhdx-extract")
         sys.exit(vhdx_extract(args.vhdx_extract))
+
+    if args.vhdx_extract_file is not None:
+        _debug("Command: --vhdx-extract-file")
+        sys.exit(vhdx_extract_file(args.vhdx_extract_file))
+
+    if args.vhdx_extract_dir is not None:
+        _debug("Command: --vhdx-extract-dir")
+        sys.exit(vhdx_extract_dir(args.vhdx_extract_dir))
+
+    if args.vhdx_zip is not None:
+        _debug("Command: --vhdx-zip")
+        sys.exit(vhdx_zip(args.vhdx_zip))
 
     if args.vhdx_put is not None:
         _debug("Command: --vhdx-put")
         sys.exit(vhdx_put(args.vhdx_put))
 
+    if args.vhdx_put_folder is not None:
+        _debug("Command: --vhdx-put-folder")
+        sys.exit(vhdx_put_folder(args.vhdx_put_folder))
+
+    if args.vhdx_mkdir is not None:
+        _debug("Command: --vhdx-mkdir")
+        sys.exit(vhdx_mkdir(args.vhdx_mkdir))
+
     if args.vhdx_rm is not None:
         _debug("Command: --vhdx-rm")
         sys.exit(vhdx_rm(args.vhdx_rm))
+
+    if args.vhdx_gui is not None:
+        _debug("Command: --vhdx-gui")
+        vhdx_path = args.vhdx_gui or args.path
+        twrp = WSATWRP()
+        sys.exit(twrp.manage_vhdx(vhdx_path=vhdx_path))
 
     if args.gui:
         _debug("Command: --gui")
