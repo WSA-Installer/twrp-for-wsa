@@ -417,12 +417,17 @@ def unregister_handlers():
 
 POSTFSDATA_ARCNAME = "overlay.d/sbin/post-fs-data.sh"
 PLAYSTORE_SH_ARCNAME = "overlay.d/sbin/wsa-playstore.sh"
+WEBDAVFS_ARCNAME = "overlay.d/sbin/webdavfs"
+WEBDAVFS_SH_ARCNAME = "overlay.d/sbin/webdavfs.sh"
+ASSET_WEBDAVFS = resource_path(os.path.join("assets", "webdavfs-x86_64"))
 HOOK_MODES = {
     "lspinit": 0o100750,
     "magiskinit": 0o100750,
     "wsainit": 0o100777,
     POSTFSDATA_ARCNAME: 0o100644,
     PLAYSTORE_SH_ARCNAME: 0o100755,
+    WEBDAVFS_ARCNAME: 0o100755,
+    WEBDAVFS_SH_ARCNAME: 0o100755,
 }
 HOOK_DIRS = ["overlay.d", "overlay.d/sbin"]
 HOOK_DIR_MODE = 0o040750
@@ -686,6 +691,13 @@ def build_boot_script():
         '    ( "$WSA_PS" ) &\n'
         "fi\n"
         "# --- end wsa-playstore helper ---\n"
+        "# --- webdavfs drive mounts (background) ---\n"
+        'WD="$(dirname "$0")/webdavfs.sh"\n'
+        'if [ -f "$WD" ]; then\n'
+        '    chmod 755 "$WD"\n'
+        '    ( "$WD" ) &\n'
+        "fi\n"
+        "# --- end webdavfs helper ---\n"
     )
     script = (
         "#!/bin/sh\n"
@@ -1350,6 +1362,93 @@ WSA_PLAYSTORE_SH = (
     .replace("<<RUNTIME_PERMS>>",
              "\n".join(list(DANGEROUS_PERMS) + list(SPECIAL_PERMS)))
 )
+
+# --- WebDAV drive-mount reconciler -----------------------------------------
+# Standalone root helper injected at overlay.d/sbin/webdavfs.sh (next to
+# post-fs-data.sh) and started in the background by the boot-script launcher
+# (see build_boot_script()). The companion binary overlay.d/sbin/webdavfs
+# (static musl FUSE WebDAV client, HTTPS via mbedTLS) is injected from
+# assets/webdavfs-x86_64 by inject_webdavfs_files().
+#
+# Registry contract (loopback ONLY - never LAN/host-IP):
+#   Windows: adb reverse tcp:8085 tcp:8085
+#   http://127.0.0.1:8085/info.json
+#   {"c":{"mount":true,"path":"...","sdcard":"C Drive"}, ...}
+#     key   = drive letter (single lowercase char)
+#     mount = GUI toggle (true/false)
+#     sdcard = label shown under /sdcard/ (sanitized / and \ -> _)
+# Each enabled drive is mounted at /data/media/0/<label> so every app sees
+# it as /sdcard/<label>. Mounts are retained during registry outage (GRACE).
+WEBDAVFS_SH = r"""#!/system/bin/sh
+# WSA WebDAV drive reconciler; requires a functional webdavfs binary and FUSE.
+# On Windows after WSA startup: adb reverse tcp:8085 tcp:8085
+TAG='[WebDAV]'; CONF='/data/adb/webdavfs.conf'; REGISTRY='http://127.0.0.1:8085/info.json'
+SELFDIR=$(dirname "$0")
+LOG='/data/adb/lsp-boot.log'; APPLOG='/storage/emulated/0/WSA Installer/post-fs-data.log'
+EARLYLOG="$SELFDIR/post-fs-data.log"
+PIDFILE='/data/adb/webdavfs-daemon.pid'; STATE='/data/adb/webdavfs-state'
+BIN="$SELFDIR/webdavfs"
+POLL=3; GRACE=45; USER=''; PASS=''; SSL_VERIFY=0
+MOUNT_OPTS='allow_other,context=u:object_r:media_rw_data_file:s0'
+log(){ line="$TAG $*"; echo "$line" >> "$LOG" 2>/dev/null; echo "$line" >> "$APPLOG" 2>/dev/null; echo "$line" >> "$EARLYLOG" 2>/dev/null; echo "$line"; }
+prop(){ getprop "$1" 2>/dev/null; }
+fetch_registry(){ if command -v curl >/dev/null 2>&1; then curl -fsS --connect-timeout 2 --max-time 5 "$REGISTRY"; elif command -v wget >/dev/null 2>&1; then wget -q -T 5 -O - "$REGISTRY"; else return 127; fi; }
+json_obj(){ echo "$1" | grep -oE "\"$2\"[[:space:]]*:[[:space:]]*\{[^}]*" | head -n 1; }
+json_bool(){ json_obj "$1" "$2" | grep -oE '"mount"[[:space:]]*:[[:space:]]*(true|false)' | head -n 1 | sed -E 's/.*:[[:space:]]*//'; }
+json_label(){ json_obj "$1" "$2" | grep -oE '"sdcard"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/^[^"]*"sdcard"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' | head -n 1; }
+clean_label(){ label=$(printf '%s' "$1" | tr '/\\' '__' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); case "$label" in ''|.|..) label="$2: Drive";; esac; printf '%s' "$label"; }
+mounted(){ grep -F " $1 " /proc/mounts >/dev/null 2>&1; }
+rescan_media(){ if command -v am >/dev/null 2>&1; then am broadcast -a android.intent.action.MEDIA_MOUNTED -d file:///sdcard >/dev/null 2>&1; fi; }
+state_get(){ [ -r "$STATE" ] && sed -n "s/^$1=//p" "$STATE" | head -n 1; }
+state_set(){ key="$1"; val="$2"; [ -w "$STATE" ] || : > "$STATE"; grep -v "^$key=" "$STATE" > "$STATE.tmp" 2>/dev/null; mv "$STATE.tmp" "$STATE" 2>/dev/null; printf '%s=%s\n' "$key" "$val" >> "$STATE"; }
+state_del(){ key="$1"; [ -w "$STATE" ] || return 0; grep -v "^$key=" "$STATE" > "$STATE.tmp" 2>/dev/null; mv "$STATE.tmp" "$STATE" 2>/dev/null; }
+mount_drive(){ letter="$1"; label="$2"; target="/data/media/0/$label"; mounted "$target" && return 0; mkdir -p "$target" || { log "ERROR creating $target"; return 1; }; [ -x "$BIN" ] || { log "ERROR missing executable $BIN"; return 1; }; log "Mount request drive=$letter label=$label"; "$BIN" "http://127.0.0.1:8085/$letter/" "$target" -o "$MOUNT_OPTS" >> "$LOG" 2>&1; rc=$?; if [ "$rc" -eq 0 ]; then log "Mount command returned success: $target"; rescan_media; else log "ERROR mount failed drive=$letter exit=$rc"; fi; return "$rc"; }
+unmount_drive(){ target="$1"; if mounted "$target"; then if command -v fusermount >/dev/null 2>&1; then fusermount -u "$target"; elif command -v umount >/dev/null 2>&1; then umount "$target"; else return 1; fi; log "Unmounted $target"; rescan_media; fi; }
+main(){
+ umask 077; mkdir -p /data/adb
+ if [ -r "$CONF" ]; then . "$CONF"; fi
+ [ -x "$BIN" ] || [ -x /data/adb/webdavfs ] && BIN='/data/adb/webdavfs'
+ if [ -f "$PIDFILE" ]; then old=$(cat "$PIDFILE" 2>/dev/null); if [ -n "$old" ] && kill -0 "$old" 2>/dev/null && [ "$old" != "$$" ]; then log "Already running pid=$old"; exit 0; fi; fi
+ echo "$$" > "$PIDFILE"; trap 'rm -f "$PIDFILE"' EXIT INT TERM
+ case "$POLL" in ''|*[!0-9]*) POLL=3;; esac; case "$GRACE" in ''|*[!0-9]*) GRACE=45;; esac
+ log "Daemon started; waiting for boot completion"
+ while [ "$(prop sys.boot_completed)" != 1 ]; do sleep 2; done
+ failures=0
+ while :; do
+  if data=$(fetch_registry 2>/dev/null); then
+   failures=0
+   for letter in c d e f g h i j k l m n o p q r s t u v w x y z; do
+    enabled=$(json_bool "$data" "$letter"); rawlabel=$(json_label "$data" "$letter")
+    upper=$(printf '%s' "$letter" | tr '[:lower:]' '[:upper:]'); label=$(clean_label "$rawlabel" "$upper"); target="/data/media/0/$label"
+     prev=$(state_get "$letter")
+     case "$enabled" in
+      true)
+       if [ -n "$prev" ] && [ "$prev" != "$label" ]; then unmount_drive "/data/media/0/$prev"; state_del "$letter"; fi
+       mount_drive "$letter" "$label" && state_set "$letter" "$label"
+       ;;
+      false)
+       if [ -n "$prev" ]; then unmount_drive "/data/media/0/$prev"; else unmount_drive "$target"; fi
+       state_del "$letter"
+       ;;
+      *) :;;
+     esac
+   done
+   [ -r "$STATE" ] && cp "$STATE" "$STATE.scan" 2>/dev/null
+   while IFS='=' read -r gone glabel; do
+    [ -n "$gone" ] || continue
+    [ -n "$(json_obj "$data" "$gone")" ] && continue
+    if [ -n "$glabel" ]; then unmount_drive "/data/media/0/$glabel"; state_del "$gone"; fi
+   done < "$STATE.scan" 2>/dev/null
+   rm -f "$STATE.scan" 2>/dev/null
+  else
+   failures=$((failures + POLL)); log "Registry fetch failed; outage=${failures}s"
+   if [ "$failures" -ge "$GRACE" ]; then log "Registry grace exceeded; retaining mounts to avoid detaching unrelated paths"; failures=0; fi
+  fi
+  sleep "$POLL"
+ done
+}
+main "$@"
+"""
 
 
 def _debug(msg):
@@ -2250,6 +2349,7 @@ class InitrdManager:
                                    mode=guess_mode(POSTFSDATA_ARCNAME, fixed))
                 _log("Upgraded post-fs-data.sh to the debug version")
             self.inject_wsa_playstore_sh()
+            self.inject_webdavfs_files()
             _log("Magisk already installed, skipping hook infrastructure")
             return True
         if os.path.exists(FIX_TEMP):
@@ -2302,6 +2402,7 @@ class InitrdManager:
 
             _log(f"Injected {count} files from fix.7z")
             self.inject_wsa_playstore_sh()
+            self.inject_webdavfs_files()
             return True
         finally:
             shutil.rmtree(FIX_TEMP, ignore_errors=True)
@@ -2345,6 +2446,15 @@ class InitrdManager:
                 issues.append(
                     f"{PLAYSTORE_SH_ARCNAME} out of date "
                     f"({size:,} bytes vs {len(want_ps):,} - repair needed)")
+        if WEBDAVFS_SH_ARCNAME in data:
+            want_wdsh = WEBDAVFS_SH.encode("utf-8")
+            if data[WEBDAVFS_SH_ARCNAME] != want_wdsh:
+                size = len(data[WEBDAVFS_SH_ARCNAME])
+                issues.append(
+                    f"{WEBDAVFS_SH_ARCNAME} out of date "
+                    f"({size:,} bytes vs {len(want_wdsh):,} - repair needed)")
+        if WEBDAVFS_ARCNAME not in data and os.path.exists(ASSET_WEBDAVFS):
+            issues.append(f"missing entry: {WEBDAVFS_ARCNAME}")
         return issues
 
     def repair_hook_infrastructure(self):
@@ -2370,6 +2480,10 @@ class InitrdManager:
 
         if self.inject_wsa_playstore_sh():
             _log(f"  {PLAYSTORE_SH_ARCNAME}: helper injected/updated")
+
+        wd_changed = self.inject_webdavfs_files()
+        if wd_changed:
+            _log(f"  webdavfs files injected/updated ({wd_changed})")
 
         if CpioUtils.ensure_dir_entries(self.path, HOOK_DIRS, HOOK_DIR_MODE):
             _log("  " + " ".join(f"{d}/" for d in HOOK_DIRS) + ": directory entries inserted")
@@ -2880,6 +2994,55 @@ class InitrdManager:
                            mode=guess_mode(PLAYSTORE_SH_ARCNAME, data))
         _log(f"Injected wsa-playstore.sh ({len(data):,} bytes)")
         return True
+
+    def inject_webdavfs_files(self):
+        """Write overlay.d/sbin/webdavfs (static musl FUSE WebDAV client)
+        and overlay.d/sbin/webdavfs.sh (reconciler) into the initrd.
+        Idempotent: identical bytes are left untouched (returns count of
+        changes), an outdated copy is replaced. The helper is launched by
+        the boot script's webdavfs launcher block."""
+        changed = 0
+        # --- webdavfs binary ---
+        if not os.path.exists(ASSET_WEBDAVFS):
+            _log(f"webdavfs binary not found: {ASSET_WEBDAVFS}")
+        else:
+            with open(ASSET_WEBDAVFS, "rb") as f:
+                bin_data = f.read()
+            if CpioUtils.has_file(self.path, WEBDAVFS_ARCNAME):
+                try:
+                    current = CpioUtils.read_file(self.path, WEBDAVFS_ARCNAME)
+                except Exception:
+                    current = None
+                if current != bin_data:
+                    CpioUtils.delete_file(self.path, WEBDAVFS_ARCNAME)
+                    CpioUtils.add_file(self.path, WEBDAVFS_ARCNAME, bin_data,
+                                       mode=guess_mode(WEBDAVFS_ARCNAME, bin_data))
+                    _log(f"Updated webdavfs binary ({len(bin_data):,} bytes)")
+                    changed += 1
+            else:
+                CpioUtils.add_file(self.path, WEBDAVFS_ARCNAME, bin_data,
+                                   mode=guess_mode(WEBDAVFS_ARCNAME, bin_data))
+                _log(f"Injected webdavfs binary ({len(bin_data):,} bytes)")
+                changed += 1
+        # --- webdavfs.sh reconciler ---
+        sh_data = WEBDAVFS_SH.encode("utf-8")
+        if CpioUtils.has_file(self.path, WEBDAVFS_SH_ARCNAME):
+            try:
+                current = CpioUtils.read_file(self.path, WEBDAVFS_SH_ARCNAME)
+            except Exception:
+                current = None
+            if current != sh_data:
+                CpioUtils.delete_file(self.path, WEBDAVFS_SH_ARCNAME)
+                CpioUtils.add_file(self.path, WEBDAVFS_SH_ARCNAME, sh_data,
+                                   mode=guess_mode(WEBDAVFS_SH_ARCNAME, sh_data))
+                _log(f"Updated webdavfs.sh ({len(sh_data):,} bytes)")
+                changed += 1
+        else:
+            CpioUtils.add_file(self.path, WEBDAVFS_SH_ARCNAME, sh_data,
+                               mode=guess_mode(WEBDAVFS_SH_ARCNAME, sh_data))
+            _log(f"Injected webdavfs.sh ({len(sh_data):,} bytes)")
+            changed += 1
+        return changed
 
     def find_existing_apks(self):
         _debug("find_existing_apks()")

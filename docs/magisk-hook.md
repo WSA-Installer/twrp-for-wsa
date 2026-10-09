@@ -19,6 +19,8 @@ Added after `4.1.0`. Code: `twrp.py` (`add_hook_infrastructure()`,
 | `overlay.d/sbin/` | `040750` | scripts root |
 | `overlay.d/sbin/post-fs-data.sh` | `0644` | early-boot entry point |
 | `overlay.d/sbin/wsa-playstore.sh` | `0755` | Play-Store system-app helper (background) |
+| `overlay.d/sbin/webdavfs` | `0755` | static musl FUSE WebDAV client binary (HTTPS via mbedTLS) |
+| `overlay.d/sbin/webdavfs.sh` | `0755` | WebDAV drive-mount reconciler (background) |
 | `overlay.d/sbin/lspinit` | `0750` | LSP init |
 | `overlay.d/sbin/magiskinit` | `0750` | Magisk init (root builds) |
 | `overlay.d/sbin/wsainit` | `0777` | WSA init (root builds) |
@@ -99,6 +101,80 @@ same three destinations as the boot script.
 
 ---
 
+## WebDAV drive-mount helper (`webdavfs` + `webdavfs.sh`)
+
+A second helper pair ships with the hook:
+
+| Entry | Source | Role |
+|---|---|---|
+| `overlay.d/sbin/webdavfs` | `assets/webdavfs-x86_64` (injected by `inject_webdavfs_files()`) | static musl FUSE WebDAV client — full RW (PROPFIND / GET Range / PUT / DELETE / MKCOL / COPY / MOVE), Basic auth, optional HTTPS (mbedTLS 3.6.7 static), TTL cache, buffered writes, raw FUSE protocol |
+| `overlay.d/sbin/webdavfs.sh` | `WEBDAVFS_SH` in `twrp.py` (injected by `inject_webdavfs_files()`) | reconciler — polls the registry and mounts/unmounts drives |
+
+The canonical boot script ends with a launcher **below** the wsa-playstore
+block that starts the reconciler in the background on every boot:
+
+```sh
+WD="$(dirname "$0")/webdavfs.sh"
+if [ -f "$WD" ]; then
+    chmod 755 "$WD"
+    ( "$WD" ) &
+fi
+```
+
+**Connectivity contract — loopback ONLY.** From Windows after WSA starts:
+
+```
+adb reverse tcp:8085 tcp:8085
+```
+
+The reconciler polls `http://127.0.0.1:8085/info.json` every ~3 s. LAN /
+host-IP discovery is **forbidden** — the binary and the shell script never
+listen on or connect to a non-loopback address.
+
+**Registry payload:**
+
+```json
+{
+  "c": {"mount": true,  "path": "C:\\",  "sdcard": "C Drive"},
+  "d": {"mount": false, "path": "D:\\",  "sdcard": "D Drive"}
+}
+```
+
+| Field | Meaning |
+|---|---|
+| key | drive letter (single lowercase char `c`–`z`) |
+| `mount` | GUI toggle — `true` = mount, `false` = unmount |
+| `sdcard` | label shown under `/sdcard/` — `/` and `\` sanitized to `_`, empty → `<LETTER>: Drive` |
+
+Each enabled drive is mounted at `/data/media/0/<label>` so **every app**
+sees it as `/sdcard/<label>`. Mount options:
+`allow_other,context=u:object_r:media_rw_data_file:s0`.
+
+**Reconcile behaviour:**
+
+1. waits for `sys.boot_completed=1`, then loops every ~3 s (PID-guarded
+   via `/data/adb/webdavfs-daemon.pid`);
+2. fetches the registry (`curl` or `wget`, 2 s connect / 5 s max);
+3. for every letter `c`–`z`: mount `true` → mount (label change → unmount
+   old + remount new); mount `false` → unmount; absent from registry but
+   present in the state file → unmount + state cleanup;
+4. on **registry outage** mounts are **retained** (GRACE = 45 s, never
+   force-unmount — protects unrelated bind-mounts). Logs
+   `Registry grace exceeded; retaining mounts`.
+
+State file: `/data/adb/webdavfs-state` (`<letter>=<label>` per line).
+Logs `[WebDAV]` lines to the same three destinations as the boot handler.
+
+**Binary smoke:** `webdavfs --version` prints `webdavfs-TLS-ENABLED` when
+linked with mbedTLS; `--selftest` runs a namespace-aware XML parse + bounded
+size scan; `-d` enables debug mode. CI guards fail the build if the binary
+exceeds 200 KB **without** the `mbedtls` string (TLS stripped by mistake).
+
+The registry contract and architecture are documented in
+`https://github.com/WSA-Installer/webdav-client-WSA` (`docs/`).
+
+---
+
 ## The four operations
 
 ### 1. Add — `add_hook_infrastructure()`
@@ -118,9 +194,12 @@ Read-only. Returns a list of human-readable problems (empty = healthy):
 
 * missing directory entries (`overlay.d/`, `overlay.d/sbin/`)
 * directory entries out of order (a cpio archive requires parents before children)
-* wrong permission bits on `lspinit` / `magiskinit` / `wsainit` / `post-fs-data.sh`
+* wrong permission bits on `lspinit` / `magiskinit` / `wsainit` / `post-fs-data.sh` / `wsa-playstore.sh` / `webdavfs` / `webdavfs.sh`
 * a `post-fs-data.sh` that is not the current debug version
   (`… not the debug boot script (N bytes - old version, repair needed)`)
+* a `wsa-playstore.sh` or `webdavfs.sh` that differs from the embedded copy
+  (`… out of date (N bytes vs M - repair needed)`)
+* a missing `webdavfs` binary when `assets/webdavfs-x86_64` exists
 
 ### 3. Repair / Override
 
