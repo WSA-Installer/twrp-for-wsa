@@ -135,9 +135,14 @@ else:
               modes.get(twrp.WEBDAVFS_ARCNAME) == 0o100755)
         check("webdavfs.sh mode 0755",
               modes.get(twrp.WEBDAVFS_SH_ARCNAME) == 0o100755)
-        # binary ELF magic
+        # binary: ELF magic OR universal shell launcher (#!/bin/sh + payload marker)
         bin_data = cpio.read_file(twrp.WEBDAVFS_ARCNAME)
-        check("webdavfs ELF magic", bin_data[:4] == b"\x7fELF")
+        is_elf = bin_data[:4] == b"\x7fELF"
+        is_universal = (bin_data[:8] == b"#!/bin/s"
+                        and b"__WEBDAVFS_PAYLOAD_BELOW__" in bin_data[:4096])
+        check("webdavfs binary is ELF or universal launcher",
+              is_elf or is_universal,
+              f"ELF={is_elf} universal={is_universal} head={bin_data[:16]!r}")
         # second inject = idempotent
         r2 = cpio.inject_webdavfs_files()
         check("second inject returns 0 (idempotent)", r2 == 0, f"got {r2}")
