@@ -2881,6 +2881,1012 @@ class InitrdManager:
         _log(f"Created folder {arcname}")
 
 
+class Ext4Error(Exception):
+    pass
+
+
+class VhdxDisk:
+    VHDX_MAGIC = b"vhdxfile"
+    REGION_OFF = 192 * 1024
+    META_GUID = bytes.fromhex("06a27c8b90479a4bb8fe575f050f886e")
+    VDSIZE_GUID = bytes.fromhex("2442a52f1bcd7648b2115dbed83bf4b8")
+    LSEC_GUID = bytes.fromhex("1dbf41816fa90947ba47f233a8faab5f")
+    PSEC_GUID = bytes.fromhex("c748a3cd5d4471449cc9e9885251c556")
+    EXT4_MAGIC = 0xEF53
+    KNOWN_EXT4_BASES = (0x800000, 0x500000)
+
+    def __init__(self, path, writable=False):
+        _debug(f"VhdxDisk({path}, writable={writable})")
+        self.path = str(path)
+        self.writable = bool(writable)
+        self.virtual_size = 0
+        self.logical_sector = 512
+        self.physical_sector = 512
+        self.ext4_base = -1
+        self._f = open(self.path, "r+b" if self.writable else "rb")
+        try:
+            self._parse_container()
+            self.ext4_base = self._detect_ext4_base()
+        except Exception:
+            self._f.close()
+            raise
+        _debug(f"  virtual_size={self.virtual_size} ext4_base=0x{self.ext4_base:x}")
+
+    def _parse_container(self):
+        self._f.seek(0)
+        if self._f.read(8) != self.VHDX_MAGIC:
+            raise Ext4Error(f"not a VHDX file: {self.path}")
+        self._f.seek(self.REGION_OFF)
+        rt = self._f.read(4096)
+        if rt[:4] != b"regi":
+            raise Ext4Error("VHDX region table not found")
+        count = struct.unpack_from("<I", rt, 8)[0]
+        meta_off = None
+        for i in range(count):
+            e = rt[16 + i * 32:48 + i * 32]
+            if e[:16] == self.META_GUID:
+                meta_off = struct.unpack_from("<Q", e, 16)[0]
+        if meta_off is None:
+            raise Ext4Error("VHDX metadata region not found")
+        self._f.seek(meta_off)
+        meta = self._f.read(0x11000)
+        if meta[:8] != b"metadata":
+            raise Ext4Error("VHDX metadata signature missing")
+        for i in range(32):
+            e = meta[64 + i * 32:96 + i * 32]
+            guid = e[:16]
+            if guid == b"\x00" * 16:
+                continue
+            off, length, _flags = struct.unpack_from("<III", e, 16)
+            if guid == self.VDSIZE_GUID and length == 8:
+                self.virtual_size = struct.unpack_from("<Q", meta, off)[0]
+            elif guid == self.LSEC_GUID and length == 4:
+                self.logical_sector = struct.unpack_from("<I", meta, off)[0]
+            elif guid == self.PSEC_GUID and length == 4:
+                self.physical_sector = struct.unpack_from("<I", meta, off)[0]
+        if self.virtual_size <= 0:
+            raise Ext4Error("VHDX virtual disk size missing")
+
+    def _sb_plausible(self, buf, off):
+        if off + 1030 > len(buf):
+            return False
+        if struct.unpack_from("<H", buf, off + 1024 + 0x38)[0] != self.EXT4_MAGIC:
+            return False
+        log_bs = struct.unpack_from("<I", buf, off + 1024 + 0x18)[0]
+        blocks = struct.unpack_from("<I", buf, off + 1024 + 0x04)[0]
+        ipg = struct.unpack_from("<I", buf, off + 1024 + 0x28)[0]
+        inodes = struct.unpack_from("<I", buf, off + 1024 + 0x00)[0]
+        if log_bs > 3 or blocks == 0 or ipg == 0 or inodes == 0:
+            return False
+        if blocks * (1024 << log_bs) > self.virtual_size + (1 << 20):
+            return False
+        return True
+
+    def _detect_ext4_base(self):
+        self._f.seek(0)
+        buf = self._f.read(min(self.virtual_size, 32 * 1024 * 1024))
+        for off in range(0, max(0, len(buf) - 1030), 4096):
+            if self._sb_plausible(buf, off):
+                return off
+        for base in self.KNOWN_EXT4_BASES:
+            if base < self.virtual_size and self._sb_plausible(buf, base):
+                return base
+        return -1
+
+    def read(self, voff, size):
+        if voff < 0 or size < 0:
+            raise ValueError("negative offset/size")
+        if self.ext4_base < 0:
+            raise Ext4Error("no ext4 filesystem detected")
+        if voff >= self.virtual_size:
+            return b""
+        size = min(size, self.virtual_size - voff)
+        self._f.seek(self.ext4_base + voff)
+        data = self._f.read(size)
+        if len(data) < size:
+            data += b"\x00" * (size - len(data))
+        return data
+
+    def write(self, voff, data):
+        if not self.writable:
+            raise Ext4Error("disk opened read-only")
+        if self.ext4_base < 0:
+            raise Ext4Error("no ext4 filesystem detected")
+        if voff < 0 or voff + len(data) > self.virtual_size:
+            raise Ext4Error("write beyond virtual disk size")
+        self._f.seek(self.ext4_base + voff)
+        self._f.write(data)
+
+    def info(self):
+        return {
+            "path": self.path,
+            "file_size": os.path.getsize(self.path),
+            "virtual_size": self.virtual_size,
+            "logical_sector": self.logical_sector,
+            "physical_sector": self.physical_sector,
+            "ext4_base": self.ext4_base,
+            "writable": self.writable,
+        }
+
+    def flush(self):
+        self._f.flush()
+
+    def close(self):
+        try:
+            self._f.close()
+        except OSError:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+class Ext4Fs:
+    EXTENTS_FL = 0x00080000
+    EXTENT_MAGIC = 0xF30A
+    INCOMPAT_RECOVER = 0x4
+    INCOMPAT_64BIT = 0x80
+    RO_METADATA_CSUM = 0x400
+    S_IFMT = 0o170000
+    S_IFDIR = 0o040000
+    S_IFREG = 0o100000
+    S_IFLNK = 0o120000
+    FT_REG, FT_DIR, FT_SYMLINK = 1, 2, 7
+    ROOT_INO = 2
+
+    def __init__(self, disk):
+        _debug("Ext4Fs()")
+        self.disk = disk
+        sb = disk.read(1024, 1024)
+        if struct.unpack_from("<H", sb, 0x38)[0] != 0xEF53:
+            raise Ext4Error("ext4 superblock magic missing")
+        self.inodes_count = struct.unpack_from("<I", sb, 0x00)[0]
+        self.blocks_count = struct.unpack_from("<I", sb, 0x04)[0]
+        self.first_data_block = struct.unpack_from("<I", sb, 0x14)[0]
+        self.block_size = 1024 << struct.unpack_from("<I", sb, 0x18)[0]
+        self.blocks_per_group = struct.unpack_from("<I", sb, 0x20)[0]
+        self.inodes_per_group = struct.unpack_from("<I", sb, 0x28)[0]
+        self.state = struct.unpack_from("<H", sb, 0x3A)[0]
+        self.first_ino = struct.unpack_from("<I", sb, 0x54)[0]
+        self.inode_size = struct.unpack_from("<H", sb, 0x58)[0]
+        self.compat = struct.unpack_from("<I", sb, 0x5C)[0]
+        self.incompat = struct.unpack_from("<I", sb, 0x60)[0]
+        self.ro_compat = struct.unpack_from("<I", sb, 0x64)[0]
+        self.desc_size = struct.unpack_from("<H", sb, 0xFE)[0] or 32
+        if self.block_size not in (1024, 2048, 4096, 8192):
+            raise Ext4Error(f"unsupported block size {self.block_size}")
+        if self.inodes_per_group == 0 or self.blocks_per_group == 0:
+            raise Ext4Error("corrupt superblock geometry")
+        if self.inode_size < 128 or self.block_size % self.inode_size:
+            raise Ext4Error("unsupported inode size")
+        if self.incompat & ~(0x2 | 0x40 | self.INCOMPAT_RECOVER | self.INCOMPAT_64BIT | 0x20000):
+            raise Ext4Error(f"unsupported incompat features 0x{self.incompat:x}")
+        self.groups_count = max(
+            (self.blocks_count - self.first_data_block
+             + self.blocks_per_group - 1) // self.blocks_per_group,
+            (self.inodes_count + self.inodes_per_group - 1)
+            // self.inodes_per_group,
+        )
+        self._sb_raw = bytearray(sb)
+        self.groups = self._load_groups()
+        _debug(f"  bs={self.block_size} blocks={self.blocks_count} "
+               f"groups={self.groups_count} state={self.state}")
+
+    @property
+    def free_blocks(self):
+        return struct.unpack_from("<I", self._sb_raw, 0x0C)[0]
+
+    @free_blocks.setter
+    def free_blocks(self, v):
+        struct.pack_into("<I", self._sb_raw, 0x0C, v & 0xFFFFFFFF)
+
+    @property
+    def free_inodes(self):
+        return struct.unpack_from("<I", self._sb_raw, 0x10)[0]
+
+    @free_inodes.setter
+    def free_inodes(self, v):
+        struct.pack_into("<I", self._sb_raw, 0x10, v & 0xFFFFFFFF)
+
+    @property
+    def writable(self):
+        return (self.disk.writable and self.state == 1
+                and not (self.incompat & self.INCOMPAT_RECOVER)
+                and not (self.incompat & self.INCOMPAT_64BIT)
+                and not (self.ro_compat & self.RO_METADATA_CSUM))
+
+    def _require_writable(self):
+        if self.disk.writable and self.writable:
+            return
+        reasons = []
+        if not self.disk.writable:
+            reasons.append("disk is read-only")
+        if self.state != 1:
+            reasons.append(f"filesystem state={self.state} (not cleanly unmounted)")
+        if self.incompat & self.INCOMPAT_RECOVER:
+            reasons.append("journal recovery required")
+        if self.incompat & self.INCOMPAT_64BIT:
+            reasons.append("64-bit ext4 not supported for writes")
+        if self.ro_compat & self.RO_METADATA_CSUM:
+            reasons.append("metadata checksums enabled")
+        raise Ext4Error("image not writable: " + "; ".join(reasons))
+
+    def _group_first_block(self, g):
+        return self.first_data_block if g == 0 else g * self.blocks_per_group
+
+    def _group_block_count(self, g):
+        return min(self.blocks_per_group,
+                   self.blocks_count - self._group_first_block(g))
+
+    def _load_groups(self):
+        gdt = self.disk.read((self.first_data_block + 1) * self.block_size,
+                             self.groups_count * self.desc_size)
+        groups = []
+        for g in range(self.groups_count):
+            o = g * self.desc_size
+            groups.append({
+                "block_bitmap": struct.unpack_from("<I", gdt, o)[0],
+                "inode_bitmap": struct.unpack_from("<I", gdt, o + 4)[0],
+                "inode_table": struct.unpack_from("<I", gdt, o + 8)[0],
+                "free_blocks": struct.unpack_from("<H", gdt, o + 0x0C)[0],
+                "free_inodes": struct.unpack_from("<H", gdt, o + 0x0E)[0],
+                "used_dirs": struct.unpack_from("<H", gdt, o + 0x10)[0],
+            })
+        return groups
+
+    def _write_gdt(self, g):
+        grp = self.groups[g]
+        off = (self.first_data_block + 1) * self.block_size + g * self.desc_size
+        raw = bytearray(self.disk.read(off, self.desc_size))
+        struct.pack_into("<H", raw, 0x0C, grp["free_blocks"] & 0xFFFF)
+        struct.pack_into("<H", raw, 0x0E, grp["free_inodes"] & 0xFFFF)
+        struct.pack_into("<H", raw, 0x10, grp["used_dirs"] & 0xFFFF)
+        self.disk.write(off, raw)
+
+    def _sync_sb(self):
+        import time as _t
+        struct.pack_into("<I", self._sb_raw, 0x30, int(_t.time()))
+        self.disk.write(1024, self._sb_raw[:1024])
+
+    def commit(self):
+        self.disk.flush()
+
+    def _inode_loc(self, ino):
+        if ino < 1 or ino > self.inodes_count:
+            raise Ext4Error(f"inode {ino} out of range")
+        g = (ino - 1) // self.inodes_per_group
+        idx = (ino - 1) % self.inodes_per_group
+        return self.groups[g]["inode_table"] * self.block_size + idx * self.inode_size
+
+    def _read_inode(self, ino):
+        raw = bytearray(self.disk.read(self._inode_loc(ino), self.inode_size))
+        mode = struct.unpack_from("<H", raw, 0)[0]
+        size = struct.unpack_from("<I", raw, 4)[0]
+        size |= struct.unpack_from("<I", raw, 0x6C)[0] << 32
+        return {
+            "ino": ino, "raw": raw, "mode": mode, "size": size,
+            "atime": struct.unpack_from("<I", raw, 8)[0],
+            "ctime": struct.unpack_from("<I", raw, 12)[0],
+            "mtime": struct.unpack_from("<I", raw, 16)[0],
+            "nlink": struct.unpack_from("<H", raw, 0x1A)[0],
+            "blocks": struct.unpack_from("<I", raw, 0x1C)[0],
+            "flags": struct.unpack_from("<I", raw, 0x20)[0],
+            "iblock": bytes(raw[0x28:0x64]),
+        }
+
+    def _write_inode(self, inode):
+        raw = inode["raw"]
+        struct.pack_into("<H", raw, 0, inode["mode"])
+        struct.pack_into("<I", raw, 4, inode["size"] & 0xFFFFFFFF)
+        struct.pack_into("<I", raw, 8, inode["atime"])
+        struct.pack_into("<I", raw, 12, inode["ctime"])
+        struct.pack_into("<I", raw, 16, inode["mtime"])
+        struct.pack_into("<H", raw, 0x1A, inode["nlink"])
+        struct.pack_into("<I", raw, 0x1C, inode["blocks"] & 0xFFFFFFFF)
+        struct.pack_into("<I", raw, 0x20, inode["flags"])
+        raw[0x28:0x64] = inode["iblock"][:60].ljust(60, b"\x00")
+        struct.pack_into("<I", raw, 0x6C, (inode["size"] >> 32) & 0xFFFFFFFF)
+        self.disk.write(self._inode_loc(inode["ino"]), raw)
+
+    def _new_inode_raw(self, mode, nlink):
+        raw = bytearray(self.inode_size)
+        now = int(time.time())
+        struct.pack_into("<H", raw, 0, mode)
+        struct.pack_into("<I", raw, 8, now)
+        struct.pack_into("<I", raw, 12, now)
+        struct.pack_into("<I", raw, 16, now)
+        struct.pack_into("<H", raw, 0x1A, nlink)
+        if self.inode_size > 128:
+            struct.pack_into("<H", raw, 0x80, 32)
+        return raw
+
+    def _parse_extent_node(self, node, _depth=0):
+        if len(node) < 12 or _depth > 2:
+            raise Ext4Error("corrupt extent node")
+        magic, entries, _mx, depth, _gen = struct.unpack_from("<HHHHI", node, 0)
+        if magic != self.EXTENT_MAGIC:
+            raise Ext4Error(f"bad extent magic 0x{magic:04x}")
+        out = []
+        for i in range(entries):
+            o = 12 + i * 12
+            if o + 12 > len(node):
+                break
+            if depth == 0:
+                lg, ln, hi, lo = struct.unpack_from("<IHHI", node, o)
+                if ln > 32768:
+                    ln -= 32768
+                out.append((lg, (hi << 32) | lo, ln))
+            else:
+                _eblk, leaf_lo, leaf_hi, _u = struct.unpack_from("<IIHH", node, o)
+                leaf = (leaf_hi << 32) | leaf_lo
+                out.extend(self._parse_extent_node(
+                    self.disk.read(leaf * self.block_size, self.block_size),
+                    _depth + 1))
+        return out
+
+    def _build_extents(self, extents):
+        if len(extents) <= 4:
+            buf = bytearray(60)
+            struct.pack_into("<HHHHI", buf, 0, self.EXTENT_MAGIC,
+                             len(extents), 4, 0, 0)
+            for i, (lg, phys, ln) in enumerate(extents):
+                struct.pack_into("<IHHI", buf, 12 + i * 12, lg, ln,
+                                 (phys >> 32) & 0xFFFF, phys & 0xFFFFFFFF)
+            return bytes(buf)
+        per_leaf = (self.block_size - 12) // 12
+        leaves = [extents[i:i + per_leaf]
+                  for i in range(0, len(extents), per_leaf)]
+        if len(leaves) > 4:
+            raise Ext4Error("file too fragmented (extent index overflow)")
+        iblock = bytearray(60)
+        struct.pack_into("<HHHHI", iblock, 0, self.EXTENT_MAGIC,
+                         len(leaves), 4, 1, 0)
+        log = 0
+        for i, leaf_exts in enumerate(leaves):
+            blk = self._alloc_blocks(1)[0]
+            body = bytearray(self.block_size)
+            struct.pack_into("<HHHHI", body, 0, self.EXTENT_MAGIC,
+                             len(leaf_exts), per_leaf, 0, 0)
+            for j, (lg, phys, ln) in enumerate(leaf_exts):
+                struct.pack_into("<IHHI", body, 12 + j * 12, lg, ln,
+                                 (phys >> 32) & 0xFFFF, phys & 0xFFFFFFFF)
+            self.disk.write(blk * self.block_size, body)
+            struct.pack_into("<IIHH", iblock, 12 + i * 12, log,
+                             blk & 0xFFFFFFFF, (blk >> 32) & 0xFFFF, 0)
+            log += sum(ln for _lg, _p, ln in leaf_exts)
+        return bytes(iblock)
+
+    def _inode_extents(self, inode):
+        if not (inode["flags"] & self.EXTENTS_FL):
+            raise Ext4Error(f"inode {inode['ino']}: non-extent files not supported")
+        return self._parse_extent_node(inode["iblock"])
+
+    def _read_inode_data(self, inode):
+        size = inode["size"]
+        if size == 0:
+            return b""
+        if ((inode["mode"] & self.S_IFMT) == self.S_IFLNK
+                and not (inode["flags"] & self.EXTENTS_FL)):
+            return bytes(inode["iblock"][:size])
+        out = bytearray(size)
+        bs = self.block_size
+        for lg, phys, ln in self._inode_extents(inode):
+            start = lg * bs
+            if start >= size:
+                continue
+            chunk = self.disk.read(phys * bs, min(ln * bs, size - start))
+            out[start:start + len(chunk)] = chunk
+        return bytes(out)
+
+    def _set_inode_data(self, inode, data):
+        bs = self.block_size
+        old_runs = []
+        try:
+            old_runs = [(p, ln) for _lg, p, ln in self._inode_extents(inode)]
+        except Ext4Error:
+            pass
+        runs = []
+        if data:
+            nblocks = (len(data) + bs - 1) // bs
+            runs = self._alloc_blocks(nblocks)
+        extents = []
+        log = 0
+        offset = 0
+        for phys, ln in runs:
+            extents.append((log, phys, ln))
+            chunk = data[offset:offset + ln * bs]
+            if len(chunk) < ln * bs:
+                chunk = chunk + b"\x00" * (ln * bs - len(chunk))
+            self.disk.write(phys * bs, chunk)
+            offset += ln * bs
+            log += ln
+        for phys, ln in old_runs:
+            self._free_blocks([(phys, ln)])
+        inode["size"] = len(data)
+        inode["blocks"] = sum(ln for _p, ln in runs) * (bs // 512)
+        inode["flags"] |= self.EXTENTS_FL
+        inode["iblock"] = self._build_extents(extents) if extents else bytes(60)
+        now = int(time.time())
+        inode["ctime"] = now
+        inode["mtime"] = now
+        self._write_inode(inode)
+
+    def _test_bit(self, buf, bit):
+        return (buf[bit // 8] >> (bit % 8)) & 1
+
+    def _set_bits(self, buf, start, count, value):
+        for bit in range(start, start + count):
+            if value:
+                buf[bit // 8] |= 1 << (bit % 8)
+            else:
+                buf[bit // 8] &= ~(1 << (bit % 8))
+
+    def _alloc_blocks(self, count):
+        self._require_writable()
+        if count <= 0:
+            return []
+        runs = []
+        remaining = count
+        for g in range(self.groups_count):
+            grp = self.groups[g]
+            n = self._group_block_count(g)
+            if grp["free_blocks"] == 0 or n <= 0:
+                continue
+            base = self._group_first_block(g)
+            bmp_off = grp["block_bitmap"] * self.block_size
+            bmp = bytearray(self.disk.read(bmp_off, self.block_size))
+            taken = 0
+            i = 0
+            while i < n and remaining > 0:
+                if self._test_bit(bmp, i):
+                    i += 1
+                    continue
+                run = 0
+                while (run < remaining and i + run < n
+                       and not self._test_bit(bmp, i + run)):
+                    run += 1
+                self._set_bits(bmp, i, run, True)
+                runs.append((base + i, run))
+                taken += run
+                remaining -= run
+                i += run
+            if taken:
+                self.disk.write(bmp_off, bmp)
+                grp["free_blocks"] -= taken
+                self._write_gdt(g)
+                self.free_blocks -= taken
+            if remaining == 0:
+                break
+        if remaining:
+            raise Ext4Error(f"out of space ({count} blocks requested)")
+        self._sync_sb()
+        return runs
+
+    def _free_blocks(self, runs):
+        for phys, ln in runs:
+            if ln <= 0:
+                continue
+            g = (phys - self.first_data_block) // self.blocks_per_group
+            if g < 0 or g >= self.groups_count:
+                continue
+            base = self._group_first_block(g)
+            bit = phys - base
+            grp = self.groups[g]
+            bmp_off = grp["block_bitmap"] * self.block_size
+            bmp = bytearray(self.disk.read(bmp_off, self.block_size))
+            self._set_bits(bmp, bit, ln, False)
+            self.disk.write(bmp_off, bmp)
+            grp["free_blocks"] += ln
+            self._write_gdt(g)
+            self.free_blocks += ln
+
+    def _alloc_inode(self):
+        self._require_writable()
+        for g in range(self.groups_count):
+            grp = self.groups[g]
+            if grp["free_inodes"] == 0:
+                continue
+            first = g * self.inodes_per_group + 1
+            last = min((g + 1) * self.inodes_per_group, self.inodes_count)
+            bmp_off = grp["inode_bitmap"] * self.block_size
+            bmp = bytearray(self.disk.read(bmp_off, self.block_size))
+            for ino in range(max(first, self.first_ino), last + 1):
+                bit = ino - first
+                if self._test_bit(bmp, bit):
+                    continue
+                self._set_bits(bmp, bit, 1, True)
+                self.disk.write(bmp_off, bmp)
+                grp["free_inodes"] -= 1
+                self._write_gdt(g)
+                self.free_inodes -= 1
+                self._sync_sb()
+                return ino
+        raise Ext4Error("out of inodes")
+
+    def _free_inode(self, ino):
+        g = (ino - 1) // self.inodes_per_group
+        bit = (ino - 1) % self.inodes_per_group
+        grp = self.groups[g]
+        bmp_off = grp["inode_bitmap"] * self.block_size
+        bmp = bytearray(self.disk.read(bmp_off, self.block_size))
+        self._set_bits(bmp, bit, 1, False)
+        self.disk.write(bmp_off, bmp)
+        grp["free_inodes"] += 1
+        self._write_gdt(g)
+        self.free_inodes += 1
+        self.disk.write(self._inode_loc(ino), b"\x00" * self.inode_size)
+
+    def _ipath(self, parent, name):
+        parent = parent.rstrip("/")
+        return (parent + "/" + name) if parent else "/" + name
+
+    def _split(self, path):
+        parts = [p for p in path.replace("\\", "/").split("/") if p]
+        if not parts:
+            raise Ext4Error("invalid path")
+        return "/" + "/".join(parts[:-1]), parts[-1]
+
+    def resolve(self, path):
+        parts = [p for p in path.replace("\\", "/").split("/") if p]
+        ino = self.ROOT_INO
+        for part in parts:
+            inode = self._read_inode(ino)
+            if (inode["mode"] & self.S_IFMT) != self.S_IFDIR:
+                raise Ext4Error(f"not a directory in path: {part}")
+            found = None
+            for name, child, _ft in self._parse_dirents(self._read_inode_data(inode)):
+                if name == part:
+                    found = child
+                    break
+            if found is None:
+                raise FileNotFoundError(f"{path}: no such entry: {part}")
+            ino = found
+        return ino
+
+    def _parse_dirents(self, data):
+        out = []
+        pos = 0
+        while pos + 8 <= len(data):
+            ino, rec_len, name_len, ftype = struct.unpack_from("<IHBB", data, pos)
+            if rec_len < 8:
+                break
+            name = data[pos + 8:pos + 8 + name_len].decode("utf-8", "replace")
+            if ino:
+                out.append((name, ino, ftype))
+            pos += rec_len
+        return out
+
+    def stat(self, path):
+        try:
+            ino = self.resolve(path)
+        except (FileNotFoundError, Ext4Error):
+            return None
+        inode = self._read_inode(ino)
+        mode = inode["mode"]
+        ftype = (self.FT_DIR if mode & self.S_IFDIR == self.S_IFDIR else
+                 self.FT_SYMLINK if mode & self.S_IFMT == self.S_IFLNK else
+                 self.FT_REG)
+        return {
+            "ino": ino, "mode": mode, "size": inode["size"],
+            "nlink": inode["nlink"], "mtime": inode["mtime"],
+            "is_dir": (mode & self.S_IFMT) == self.S_IFDIR,
+            "is_lnk": (mode & self.S_IFMT) == self.S_IFLNK,
+            "is_reg": (mode & self.S_IFMT) == self.S_IFREG,
+            "ftype": ftype,
+        }
+
+    def listdir(self, path="/"):
+        inode = self._read_inode(self.resolve(path))
+        if (inode["mode"] & self.S_IFMT) != self.S_IFDIR:
+            raise Ext4Error(f"not a directory: {path}")
+        return self._parse_dirents(self._read_inode_data(inode))
+
+    def read_file(self, path):
+        inode = self._read_inode(self.resolve(path))
+        if (inode["mode"] & self.S_IFMT) == self.S_IFLNK:
+            return self._read_inode_data(inode)
+        if (inode["mode"] & self.S_IFMT) != self.S_IFREG:
+            raise Ext4Error(f"not a regular file: {path}")
+        return self._read_inode_data(inode)
+
+    def walk(self, path="/"):
+        ino = self.resolve(path)
+        stack = [(path.rstrip("/") or "/", ino)]
+        while stack:
+            dirpath, dir_ino = stack.pop()
+            inode = self._read_inode(dir_ino)
+            dirs, files = [], []
+            for name, child, _ft in self._parse_dirents(self._read_inode_data(inode)):
+                if name in (".", ".."):
+                    continue
+                child_inode = self._read_inode(child)
+                mode = child_inode["mode"]
+                if (mode & self.S_IFMT) == self.S_IFDIR:
+                    dirs.append(name)
+                    stack.append((self._ipath(dirpath, name), child))
+                else:
+                    files.append(name)
+            yield dirpath, dirs, files
+
+    def _dir_add(self, parent_ino, name, child_ino, ftype):
+        nb = name.encode("utf-8")
+        if len(nb) > 255:
+            raise Ext4Error("name too long")
+        need = (8 + len(nb) + 3) & ~3
+        parent = self._read_inode(parent_ino)
+        data = bytearray(self._read_inode_data(parent))
+        pos = 0
+        saw_entry = False
+        while pos + 8 <= len(data):
+            ino, rec_len, name_len, _ft = struct.unpack_from("<IHBB", data, pos)
+            if rec_len < 8:
+                break
+            saw_entry = True
+            actual = (8 + name_len + 3) & ~3
+            if ino == 0 and rec_len >= need:
+                struct.pack_into("<IHBB", data, pos, child_ino,
+                                 rec_len, len(nb), ftype)
+                data[pos + 8:pos + 8 + len(nb)] = nb
+                self._set_inode_data(parent, bytes(data))
+                return
+            if rec_len >= actual + need:
+                struct.pack_into("<H", data, pos + 4, actual)
+                npos = pos + actual
+                struct.pack_into("<IHBB", data, npos, child_ino,
+                                 rec_len - actual, len(nb), ftype)
+                data[npos + 8:npos + 8 + len(nb)] = nb
+                self._set_inode_data(parent, bytes(data))
+                return
+            pos += rec_len
+        if not saw_entry and len(data) >= self.block_size:
+            block = bytearray(self.block_size)
+            struct.pack_into("<IHBB", block, 0, child_ino,
+                             self.block_size, len(nb), ftype)
+            block[8:8 + len(nb)] = nb
+            self._set_inode_data(parent, bytes(block))
+            return
+        (blk,), = self._alloc_blocks(1)
+        block = bytearray(self.block_size)
+        struct.pack_into("<IHBB", block, 0, child_ino,
+                         self.block_size, len(nb), ftype)
+        block[8:8 + len(nb)] = nb
+        data.extend(block)
+        self._set_inode_data(parent, bytes(data))
+
+    def _dir_remove(self, parent_ino, name):
+        nb = name.encode("utf-8")
+        parent = self._read_inode(parent_ino)
+        data = bytearray(self._read_inode_data(parent))
+        pos = 0
+        prev = None
+        while pos + 8 <= len(data):
+            ino, rec_len, name_len, _ft = struct.unpack_from("<IHBB", data, pos)
+            if rec_len < 8:
+                break
+            if ino and data[pos + 8:pos + 8 + name_len] == nb:
+                if prev is not None:
+                    prev_rec = struct.unpack_from("<H", data, prev + 4)[0]
+                    struct.pack_into("<H", data, prev + 4, prev_rec + rec_len)
+                else:
+                    struct.pack_into("<I", data, pos, 0)
+                self._set_inode_data(parent, bytes(data))
+                return True
+            prev = pos
+            pos += rec_len
+        return False
+
+    def write_file(self, path, data, mode=0o644):
+        self._require_writable()
+        parent_path, name = self._split(path)
+        parent_ino = self.resolve(parent_path)
+        parent = self._read_inode(parent_ino)
+        if (parent["mode"] & self.S_IFMT) != self.S_IFDIR:
+            raise Ext4Error(f"parent is not a directory: {parent_path}")
+        for existing_name, existing_ino, _ft in self._parse_dirents(
+                self._read_inode_data(parent)):
+            if existing_name == name:
+                inode = self._read_inode(existing_ino)
+                if (inode["mode"] & self.S_IFMT) != self.S_IFREG:
+                    raise Ext4Error(f"exists and is not a file: {path}")
+                self._set_inode_data(inode, data)
+                return existing_ino
+        ino = self._alloc_inode()
+        inode = {
+            "ino": ino, "raw": self._new_inode_raw(self.S_IFREG | mode, 1),
+            "mode": self.S_IFREG | mode, "size": 0,
+            "atime": 0, "ctime": 0, "mtime": 0, "nlink": 1,
+            "blocks": 0, "flags": 0, "iblock": bytes(60),
+        }
+        self._set_inode_data(inode, data)
+        self._dir_add(parent_ino, name, ino, self.FT_REG)
+        return ino
+
+    def mkdir(self, path, mode=0o755):
+        self._require_writable()
+        parent_path, name = self._split(path)
+        parent_ino = self.resolve(parent_path)
+        parent = self._read_inode(parent_ino)
+        if (parent["mode"] & self.S_IFMT) != self.S_IFDIR:
+            raise Ext4Error(f"parent is not a directory: {parent_path}")
+        for existing_name, _ino, _ft in self._parse_dirents(
+                self._read_inode_data(parent)):
+            if existing_name == name:
+                raise Ext4Error(f"already exists: {path}")
+        ino = self._alloc_inode()
+        inode = {
+            "ino": ino, "raw": self._new_inode_raw(self.S_IFDIR | mode, 2),
+            "mode": self.S_IFDIR | mode, "size": 0,
+            "atime": 0, "ctime": 0, "mtime": 0, "nlink": 2,
+            "blocks": 0, "flags": 0, "iblock": bytes(60),
+        }
+        block = bytearray(self.block_size)
+        struct.pack_into("<IHBB", block, 0, ino, 12, 1, self.FT_DIR)
+        block[8] = ord(".")
+        struct.pack_into("<IHBB", block, 12, parent_ino,
+                         self.block_size - 12, 2, self.FT_DIR)
+        block[20:22] = b".."
+        self._set_inode_data(inode, bytes(block))
+        self._dir_add(parent_ino, name, ino, self.FT_DIR)
+        parent = self._read_inode(parent_ino)
+        parent["nlink"] += 1
+        now = int(time.time())
+        parent["ctime"] = now
+        parent["mtime"] = now
+        self._write_inode(parent)
+        g = (ino - 1) // self.inodes_per_group
+        self.groups[g]["used_dirs"] += 1
+        self._write_gdt(g)
+        return ino
+
+    def symlink(self, target, path):
+        self._require_writable()
+        tb = target.encode("utf-8")
+        if len(tb) > 60:
+            raise Ext4Error("symlink target too long (max 60 bytes)")
+        parent_path, name = self._split(path)
+        parent_ino = self.resolve(parent_path)
+        ino = self._alloc_inode()
+        raw = self._new_inode_raw(self.S_IFLNK | 0o777, 1)
+        raw[0x28:0x28 + len(tb)] = tb
+        struct.pack_into("<I", raw, 4, len(tb))
+        self.disk.write(self._inode_loc(ino), raw)
+        self._dir_add(parent_ino, name, ino, self.FT_SYMLINK)
+        return ino
+
+    def unlink(self, path):
+        self._require_writable()
+        parent_path, name = self._split(path)
+        parent_ino = self.resolve(parent_path)
+        ino = self.resolve(path)
+        inode = self._read_inode(ino)
+        if (inode["mode"] & self.S_IFMT) == self.S_IFDIR:
+            raise Ext4Error(f"is a directory: {path} (use rmdir)")
+        if not self._dir_remove(parent_ino, name):
+            raise Ext4Error(f"dirent not found: {path}")
+        try:
+            runs = [(p, ln) for _lg, p, ln in self._inode_extents(inode)]
+        except Ext4Error:
+            runs = []
+        self._free_blocks(runs)
+        self._free_inode(ino)
+        now = int(time.time())
+        parent = self._read_inode(parent_ino)
+        parent["ctime"] = now
+        parent["mtime"] = now
+        self._write_inode(parent)
+        self._sync_sb()
+
+    def rmdir(self, path):
+        self._require_writable()
+        parent_path, name = self._split(path)
+        parent_ino = self.resolve(parent_path)
+        ino = self.resolve(path)
+        inode = self._read_inode(ino)
+        if (inode["mode"] & self.S_IFMT) != self.S_IFDIR:
+            raise Ext4Error(f"not a directory: {path}")
+        entries = [e for e in self._parse_dirents(self._read_inode_data(inode))
+                   if e[0] not in (".", "..")]
+        if entries:
+            raise Ext4Error(f"directory not empty: {path}")
+        if not self._dir_remove(parent_ino, name):
+            raise Ext4Error(f"dirent not found: {path}")
+        runs = [(p, ln) for _lg, p, ln in self._inode_extents(inode)]
+        self._free_blocks(runs)
+        self._free_inode(ino)
+        parent = self._read_inode(parent_ino)
+        parent["nlink"] -= 1
+        now = int(time.time())
+        parent["ctime"] = now
+        parent["mtime"] = now
+        self._write_inode(parent)
+        g = (ino - 1) // self.inodes_per_group
+        self.groups[g]["used_dirs"] -= 1
+        self._write_gdt(g)
+        self._sync_sb()
+
+
+def _vhdx_open(path, writable=False):
+    try:
+        disk = VhdxDisk(path, writable=writable)
+    except PermissionError as e:
+        raise Ext4Error(
+            f"cannot open {path} ({'read-write' if writable else 'read-only'}): "
+            f"file is locked - stop WSA first (WsaClient.exe /shutdown) and retry"
+        ) from e
+    if disk.ext4_base < 0:
+        disk.close()
+        raise Ext4Error(f"no ext4 filesystem detected in {path}")
+    return disk, Ext4Fs(disk)
+
+
+def _vhdx_backup_once(path):
+    bak = path + ".preedit.bak"
+    if not os.path.exists(bak):
+        _log(f"Backup: {path} -> {bak}")
+        shutil.copy2(path, bak)
+    else:
+        _log(f"Backup already exists: {bak}")
+
+
+def vhdx_info(paths):
+    _debug(f"vhdx_info({paths})")
+    rc = 0
+    files = []
+    for p in paths:
+        if os.path.isdir(p):
+            files.extend(os.path.join(p, n) for n in sorted(os.listdir(p))
+                         if n.lower().endswith(".vhdx"))
+        else:
+            files.append(p)
+    if not files:
+        print("No .vhdx files found")
+        return 1
+    for p in files:
+        try:
+            disk = VhdxDisk(p)
+        except Exception as e:
+            print(f"{p}: ERROR {e}")
+            rc = 1
+            continue
+        info = disk.info()
+        print(p)
+        print(f"  file size       : {info['file_size']}")
+        print(f"  virtual size    : {info['virtual_size']}")
+        print(f"  sectors         : logical={info['logical_sector']} "
+              f"physical={info['physical_sector']}")
+        if info["ext4_base"] >= 0:
+            try:
+                fs = Ext4Fs(disk)
+                print(f"  filesystem      : ext4")
+                print(f"  ext4 base       : 0x{info['ext4_base']:x}")
+                print(f"  block size      : {fs.block_size}")
+                print(f"  blocks          : {fs.blocks_count} "
+                      f"(free {fs.free_blocks})")
+                print(f"  inodes          : {fs.inodes_count} "
+                      f"(free {fs.free_inodes})")
+                print(f"  state           : {fs.state} "
+                      f"({'clean' if fs.state == 1 else 'dirty'})")
+                print(f"  writable        : {'yes' if fs.writable else 'no'}")
+            except Exception as e:
+                print(f"  filesystem      : ext4 detected, parse error: {e}")
+                rc = 1
+        else:
+            print(f"  filesystem      : none detected")
+        disk.close()
+    return rc
+
+
+def vhdx_ls(args):
+    _debug(f"vhdx_ls({args})")
+    vhdx = args[0]
+    target = args[1] if len(args) > 1 else "/"
+    disk, fs = _vhdx_open(vhdx)
+    try:
+        for name, ino, ftype in fs.listdir(target):
+            kind = {Ext4Fs.FT_DIR: "d", Ext4Fs.FT_SYMLINK: "l"}.get(ftype, "-")
+            print(f"{kind} {ino:>8} {name}")
+        return 0
+    finally:
+        disk.close()
+
+
+def vhdx_extract(args):
+    _debug(f"vhdx_extract({args})")
+    if len(args) < 2:
+        print("usage: --vhdx-extract VHDX SRC [DST]")
+        return 2
+    vhdx, src = args[0], args[1]
+    disk, fs = _vhdx_open(vhdx)
+    try:
+        st = fs.stat(src)
+        if st is None:
+            print(f"not found in image: {src}")
+            return 1
+        if st["is_reg"]:
+            dst = args[2] if len(args) > 2 else os.path.basename(
+                src.rstrip("/")) or "extracted.bin"
+            data = fs.read_file(src)
+            with open(dst, "wb") as f:
+                f.write(data)
+            _log(f"Extracted {src} -> {dst} ({len(data)} bytes)")
+            return 0
+        if st["is_dir"]:
+            dst = args[2] if len(args) > 2 else (
+                os.path.basename(src.rstrip("/")) or "extracted")
+            os.makedirs(dst, exist_ok=True)
+            base = src.rstrip("/") or ""
+            count = 0
+            for dirpath, dirs, files in fs.walk(src):
+                rel = dirpath[len(base):].strip("/") if base else ""
+                out_dir = os.path.join(dst, rel) if rel else dst
+                os.makedirs(out_dir, exist_ok=True)
+                for fn in files:
+                    data = fs.read_file(fs._ipath(dirpath, fn))
+                    with open(os.path.join(out_dir, fn), "wb") as f:
+                        f.write(data)
+                    count += 1
+            _log(f"Extracted {count} files from {src} -> {dst}")
+            return 0
+        print(f"unsupported type: {src}")
+        return 1
+    finally:
+        disk.close()
+
+
+def vhdx_put(args):
+    _debug(f"vhdx_put({args})")
+    if len(args) != 3:
+        print("usage: --vhdx-put VHDX LOCAL DEST")
+        return 2
+    vhdx, local, dest = args
+    if not os.path.isfile(local):
+        print(f"local file not found: {local}")
+        return 1
+    _vhdx_backup_once(vhdx)
+    disk, fs = _vhdx_open(vhdx, writable=True)
+    try:
+        with open(local, "rb") as f:
+            data = f.read()
+        dest = dest.replace("\\", "/")
+        if dest.endswith("/"):
+            dest = dest + os.path.basename(local)
+        fs.write_file(dest, data)
+        fs.commit()
+        _log(f"Written {len(data)} bytes -> {dest}")
+        return 0
+    finally:
+        disk.close()
+
+
+def vhdx_rm(args):
+    _debug(f"vhdx_rm({args})")
+    if len(args) != 2:
+        print("usage: --vhdx-rm VHDX PATH")
+        return 2
+    vhdx, target = args
+    _vhdx_backup_once(vhdx)
+    disk, fs = _vhdx_open(vhdx, writable=True)
+    try:
+        st = fs.stat(target)
+        if st is None:
+            print(f"not found in image: {target}")
+            return 1
+        if st["is_dir"]:
+            fs.rmdir(target)
+            _log(f"Removed directory {target}")
+        else:
+            fs.unlink(target)
+            _log(f"Removed file {target}")
+        fs.commit()
+        return 0
+    finally:
+        disk.close()
+
+
 class WSADetector:
 
     @staticmethod
@@ -2943,6 +3949,36 @@ class WSADetector:
         p = os.path.join(wsa_path, "Tools", "initrd.img")
         _debug(f"initrd_path() -> {p}")
         return p
+
+    @staticmethod
+    def vhdx_list(wsa_path=None):
+        _debug("WSADetector.vhdx_list()")
+        roots = []
+        if wsa_path:
+            roots.append(wsa_path)
+        else:
+            loc = WSADetector.find_path()
+            if loc:
+                roots.append(loc)
+        local = os.environ.get("LOCALAPPDATA", "")
+        if local:
+            roots.append(os.path.join(local, "Packages", WSA_FAMILY, "LocalCache"))
+        seen, out = set(), []
+        for root in roots:
+            if not root or not os.path.isdir(root):
+                continue
+            for name in sorted(os.listdir(root)):
+                if not name.lower().endswith(".vhdx"):
+                    continue
+                p = os.path.join(root, name)
+                key = os.path.normcase(p)
+                if key in seen or not os.path.isfile(p):
+                    continue
+                seen.add(key)
+                out.append({"name": name, "path": p,
+                            "size": os.path.getsize(p)})
+        _debug(f"  found {len(out)} vhdx")
+        return out
 
     @staticmethod
     def is_running():
@@ -8717,6 +9753,11 @@ Examples:
   {CLI_NAME} --gui --path C:\\initrd.img                   Manage a specific file
   {CLI_NAME} --register-img                                Add .img -> Open with -> WSA IMG Manager
   {CLI_NAME} --unregister-img                              Remove the .img Open with entries
+  {CLI_NAME} --vhdx-info C:\\WSA\\system.vhdx              Show VHDX container + ext4 info
+  {CLI_NAME} --vhdx-ls C:\\WSA\\system.vhdx /system       List a directory inside the image
+  {CLI_NAME} --vhdx-extract C:\\WSA\\system.vhdx /system/build.prop .  Extract a file
+  {CLI_NAME} --vhdx-put C:\\WSA\\system.vhdx app.apk /system/app/x.apk  Copy a file in
+  {CLI_NAME} --vhdx-rm C:\\WSA\\system.vhdx /system/app/x.apk  Remove a file/dir
         """)
     parser.add_argument("--status", action="store_true",
                         help="Check WSA and TWRP status")
@@ -8773,6 +9814,21 @@ Examples:
                         help="Register .img files -> Open with -> WSA IMG Manager (Explorer)")
     parser.add_argument("--unregister-img", action="store_true",
                         help="Remove the .img Open with / context-menu registration")
+    parser.add_argument("--vhdx-info", nargs='+', default=None,
+                        help="Show VHDX container + ext4 info: --vhdx-info VHDX [VHDX...] "
+                             "(a directory scans all *.vhdx in it)")
+    parser.add_argument("--vhdx-ls", nargs='+', default=None,
+                        help="List a directory inside a VHDX ext4: --vhdx-ls VHDX [PATH]")
+    parser.add_argument("--vhdx-extract", nargs='+', default=None,
+                        help="Extract a file/dir from a VHDX: --vhdx-extract VHDX SRC [DST]")
+    parser.add_argument("--vhdx-put", nargs='+', default=None,
+                        help="Copy a host file into a VHDX ext4: --vhdx-put VHDX LOCAL DEST "
+                             "(DEST may end with / to keep the local basename; "
+                             "image must be cleanly unmounted, no metadata checksums; "
+                             "creates VHDX.preedit.bak once before the first write)")
+    parser.add_argument("--vhdx-rm", nargs='+', default=None,
+                        help="Remove a file/empty dir from a VHDX ext4: --vhdx-rm VHDX PATH "
+                             "(same write constraints as --vhdx-put)")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug output")
     args = parser.parse_args()
@@ -8795,6 +9851,26 @@ Examples:
     if args.unregister_img:
         _debug("Command: --unregister-img")
         sys.exit(unregister_img_handler())
+
+    if args.vhdx_info is not None:
+        _debug("Command: --vhdx-info")
+        sys.exit(vhdx_info(args.vhdx_info))
+
+    if args.vhdx_ls is not None:
+        _debug("Command: --vhdx-ls")
+        sys.exit(vhdx_ls(args.vhdx_ls))
+
+    if args.vhdx_extract is not None:
+        _debug("Command: --vhdx-extract")
+        sys.exit(vhdx_extract(args.vhdx_extract))
+
+    if args.vhdx_put is not None:
+        _debug("Command: --vhdx-put")
+        sys.exit(vhdx_put(args.vhdx_put))
+
+    if args.vhdx_rm is not None:
+        _debug("Command: --vhdx-rm")
+        sys.exit(vhdx_rm(args.vhdx_rm))
 
     if args.gui:
         _debug("Command: --gui")
