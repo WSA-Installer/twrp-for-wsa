@@ -111,13 +111,13 @@ A second helper pair ships with the hook:
 | `overlay.d/sbin/webdavfs.sh` | `WEBDAVFS_SH` in `twrp.py` (injected by `inject_webdavfs_files()`) | reconciler — polls the registry and mounts/unmounts drives |
 
 The canonical boot script ends with a launcher **below** the wsa-playstore
-block that starts the reconciler in the background on every boot:
+block that starts the reconciler in a new session (`setsid`) on every boot:
 
 ```sh
 WD="$(dirname "$0")/webdavfs.sh"
 if [ -f "$WD" ]; then
     chmod 755 "$WD"
-    ( "$WD" ) &
+    setsid sh "$WD" < /dev/null > /dev/null 2>&1 &
 fi
 ```
 
@@ -146,8 +146,17 @@ listen on or connect to a non-loopback address.
 | `mount` | GUI toggle — `true` = mount, `false` = unmount |
 | `sdcard` | label shown under `/sdcard/` — `/` and `\` sanitized to `_`, empty → `<LETTER>: Drive` |
 
-Each enabled drive is mounted at `/data/media/0/<label>` so **every app**
-sees it as `/sdcard/<label>`. Mount options:
+Each enabled drive is mounted as **USB-style external storage**:
+
+1. FUSE mount at `/mnt/media_rw/<SHORT>` — short name derived from the
+   `sdcard` label (alphanumeric + `._-`, max 16 chars, fallback to drive
+   letter). `/mnt/media_rw/` is Android's secondary-volume root; file
+   managers list entries there as external storage.
+2. Symlink `/storage/<SHORT>` → `/mnt/media_rw/<SHORT>` — the path apps
+   and file managers actually scan.
+3. `MEDIA_MOUNTED` broadcast sent to both `/storage/<SHORT>` and `/sdcard`.
+
+Mount options:
 `allow_other,context=u:object_r:media_rw_data_file:s0`.
 
 **Reconcile behaviour:**
@@ -156,13 +165,14 @@ sees it as `/sdcard/<label>`. Mount options:
    via `/data/adb/webdavfs-daemon.pid`);
 2. fetches the registry (`curl` or `wget`, 2 s connect / 5 s max);
 3. for every letter `c`–`z`: mount `true` → mount (label change → unmount
-   old + remount new); mount `false` → unmount; absent from registry but
-   present in the state file → unmount + state cleanup;
+   old short + remount new); mount `false` → unmount + remove symlink;
+   absent from registry but present in the state file → unmount + state
+   cleanup;
 4. on **registry outage** mounts are **retained** (GRACE = 45 s, never
    force-unmount — protects unrelated bind-mounts). Logs
    `Registry grace exceeded; retaining mounts`.
 
-State file: `/data/adb/webdavfs-state` (`<letter>=<label>` per line).
+State file: `/data/adb/webdavfs-state` (`<letter>=<shortname>` per line).
 Logs `[WebDAV]` lines to the same three destinations as the boot handler.
 
 **Binary smoke:** `webdavfs --version` prints `webdavfs-TLS-ENABLED` when

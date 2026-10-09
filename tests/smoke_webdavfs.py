@@ -64,7 +64,11 @@ check("has GRACE=45", "GRACE=45" in sh)
 check("has MOUNT_OPTS", "MOUNT_OPTS=" in sh)
 check("has state file", "webdavfs-state" in sh)
 check("has rescan_media", "rescan_media" in sh)
+check("has rescan_storage", "rescan_storage" in sh)
+check("has short_name", "short_name()" in sh)
 check("has PIDFILE", "webdavfs-daemon.pid" in sh)
+check("mounts at /mnt/media_rw/", "/mnt/media_rw/" in sh)
+check("creates /storage/ symlink", "/storage/" in sh and "ln -sfn" in sh)
 check("no LAN/host-IP discovery", "192.168" not in sh and "10.0" not in sh)
 check("no trailing whitespace lines", not any(
     line.rstrip("\n").endswith(" ") for line in sh.splitlines(True)))
@@ -100,7 +104,8 @@ check("has webdavfs launcher close marker",
 check("has WD dirname",
       'WD="$(dirname "$0")/webdavfs.sh"' in script_s)
 check("has chmod 755 WD", 'chmod 755 "$WD"' in script_s)
-check("has background launch", '( "$WD" ) &' in script_s)
+check("has setsid for daemon survival", "setsid sh" in script_s)
+check("has background launch", 'setsid sh "$WD" < /dev/null > /dev/null 2>&1 &' in script_s)
 check("has if [ -f WD ]", 'if [ -f "$WD" ]' in script_s)
 # launcher after wsa-playstore
 ps_pos = script_s.find("# --- end wsa-playstore helper ---")

@@ -695,7 +695,7 @@ def build_boot_script():
         'WD="$(dirname "$0")/webdavfs.sh"\n'
         'if [ -f "$WD" ]; then\n'
         '    chmod 755 "$WD"\n'
-        '    ( "$WD" ) &\n'
+        '    setsid sh "$WD" < /dev/null > /dev/null 2>&1 &\n'
         "fi\n"
         "# --- end webdavfs helper ---\n"
     )
@@ -1377,8 +1377,9 @@ WSA_PLAYSTORE_SH = (
 #     key   = drive letter (single lowercase char)
 #     mount = GUI toggle (true/false)
 #     sdcard = label shown under /sdcard/ (sanitized / and \ -> _)
-# Each enabled drive is mounted at /data/media/0/<label> so every app sees
-# it as /sdcard/<label>. Mounts are retained during registry outage (GRACE).
+# Each enabled drive is mounted at /mnt/media_rw/<SHORT> (USB-style) with a
+# /storage/<SHORT> symlink so file managers show it as external storage.
+# Mounts are retained during registry outage (GRACE).
 WEBDAVFS_SH = r"""#!/system/bin/sh
 # WSA WebDAV drive reconciler; requires a functional webdavfs binary and FUSE.
 # On Windows after WSA startup: adb reverse tcp:8085 tcp:8085
@@ -1397,13 +1398,15 @@ json_obj(){ echo "$1" | grep -oE "\"$2\"[[:space:]]*:[[:space:]]*\{[^}]*" | head
 json_bool(){ json_obj "$1" "$2" | grep -oE '"mount"[[:space:]]*:[[:space:]]*(true|false)' | head -n 1 | sed -E 's/.*:[[:space:]]*//'; }
 json_label(){ json_obj "$1" "$2" | grep -oE '"sdcard"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/^[^"]*"sdcard"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' | head -n 1; }
 clean_label(){ label=$(printf '%s' "$1" | tr '/\\' '__' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); case "$label" in ''|.|..) label="$2: Drive";; esac; printf '%s' "$label"; }
+short_name(){ short=$(printf '%s' "$1" | tr -cd 'A-Za-z0-9._-' | cut -c1-16); [ -n "$short" ] || short="$2"; printf '%s' "$short"; }
 mounted(){ grep -F " $1 " /proc/mounts >/dev/null 2>&1; }
 rescan_media(){ if command -v am >/dev/null 2>&1; then am broadcast -a android.intent.action.MEDIA_MOUNTED -d file:///sdcard >/dev/null 2>&1; fi; }
+rescan_storage(){ if command -v am >/dev/null 2>&1; then am broadcast -a android.intent.action.MEDIA_MOUNTED -d "file:///storage/$1" >/dev/null 2>&1; fi; }
 state_get(){ [ -r "$STATE" ] && sed -n "s/^$1=//p" "$STATE" | head -n 1; }
 state_set(){ key="$1"; val="$2"; [ -w "$STATE" ] || : > "$STATE"; grep -v "^$key=" "$STATE" > "$STATE.tmp" 2>/dev/null; mv "$STATE.tmp" "$STATE" 2>/dev/null; printf '%s=%s\n' "$key" "$val" >> "$STATE"; }
 state_del(){ key="$1"; [ -w "$STATE" ] || return 0; grep -v "^$key=" "$STATE" > "$STATE.tmp" 2>/dev/null; mv "$STATE.tmp" "$STATE" 2>/dev/null; }
-mount_drive(){ letter="$1"; label="$2"; target="/data/media/0/$label"; mounted "$target" && return 0; mkdir -p "$target" || { log "ERROR creating $target"; return 1; }; [ -x "$BIN" ] || { log "ERROR missing executable $BIN"; return 1; }; log "Mount request drive=$letter label=$label"; "$BIN" "http://127.0.0.1:8085/$letter/" "$target" -o "$MOUNT_OPTS" >> "$LOG" 2>&1; rc=$?; if [ "$rc" -eq 0 ]; then log "Mount command returned success: $target"; rescan_media; else log "ERROR mount failed drive=$letter exit=$rc"; fi; return "$rc"; }
-unmount_drive(){ target="$1"; if mounted "$target"; then if command -v fusermount >/dev/null 2>&1; then fusermount -u "$target"; elif command -v umount >/dev/null 2>&1; then umount "$target"; else return 1; fi; log "Unmounted $target"; rescan_media; fi; }
+mount_drive(){ letter="$1"; label="$2"; short=$(short_name "$label" "$(printf '%s' "$letter" | tr '[:lower:]' '[:upper:]')"); target="/mnt/media_rw/$short"; storage="/storage/$short"; mounted "$target" && { [ -L "$storage" ] || ln -sfn "$target" "$storage" 2>/dev/null; return 0; }; mkdir -p "$target" || { log "ERROR creating $target"; return 1; }; [ -x "$BIN" ] || { log "ERROR missing executable $BIN"; return 1; }; log "Mount request drive=$letter label=$label short=$short"; "$BIN" "http://127.0.0.1:8085/$letter/" "$target" -o "$MOUNT_OPTS" >> "$LOG" 2>&1; rc=$?; if [ "$rc" -eq 0 ]; then ln -sfn "$target" "$storage" 2>/dev/null; log "Mounted $target -> $storage"; rescan_storage "$short"; rescan_media; else log "ERROR mount failed drive=$letter exit=$rc"; fi; return "$rc"; }
+unmount_drive(){ short="$1"; target="/mnt/media_rw/$short"; storage="/storage/$short"; if mounted "$target"; then if command -v fusermount >/dev/null 2>&1; then fusermount -u "$target"; elif command -v umount >/dev/null 2>&1; then umount "$target"; else return 1; fi; log "Unmounted $target"; fi; [ -L "$storage" ] && rm -f "$storage" 2>/dev/null; rescan_media; }
 main(){
  umask 077; mkdir -p /data/adb
  if [ -r "$CONF" ]; then . "$CONF"; fi
@@ -1419,25 +1422,25 @@ main(){
    failures=0
    for letter in c d e f g h i j k l m n o p q r s t u v w x y z; do
     enabled=$(json_bool "$data" "$letter"); rawlabel=$(json_label "$data" "$letter")
-    upper=$(printf '%s' "$letter" | tr '[:lower:]' '[:upper:]'); label=$(clean_label "$rawlabel" "$upper"); target="/data/media/0/$label"
+    upper=$(printf '%s' "$letter" | tr '[:lower:]' '[:upper:]'); label=$(clean_label "$rawlabel" "$upper"); short=$(short_name "$label" "$upper")
      prev=$(state_get "$letter")
      case "$enabled" in
       true)
-       if [ -n "$prev" ] && [ "$prev" != "$label" ]; then unmount_drive "/data/media/0/$prev"; state_del "$letter"; fi
-       mount_drive "$letter" "$label" && state_set "$letter" "$label"
+       if [ -n "$prev" ] && [ "$prev" != "$short" ]; then unmount_drive "$prev"; state_del "$letter"; fi
+       mount_drive "$letter" "$label" && state_set "$letter" "$short"
        ;;
       false)
-       if [ -n "$prev" ]; then unmount_drive "/data/media/0/$prev"; else unmount_drive "$target"; fi
+       if [ -n "$prev" ]; then unmount_drive "$prev"; else unmount_drive "$short"; fi
        state_del "$letter"
        ;;
       *) :;;
      esac
    done
    [ -r "$STATE" ] && cp "$STATE" "$STATE.scan" 2>/dev/null
-   while IFS='=' read -r gone glabel; do
+   while IFS='=' read -r gone gshort; do
     [ -n "$gone" ] || continue
     [ -n "$(json_obj "$data" "$gone")" ] && continue
-    if [ -n "$glabel" ]; then unmount_drive "/data/media/0/$glabel"; state_del "$gone"; fi
+    if [ -n "$gshort" ]; then unmount_drive "$gshort"; state_del "$gone"; fi
    done < "$STATE.scan" 2>/dev/null
    rm -f "$STATE.scan" 2>/dev/null
   else
