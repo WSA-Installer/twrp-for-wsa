@@ -1411,7 +1411,7 @@ unmount_drive(){ short="$1"; target="/mnt/media_rw/$short"; storage="/storage/$s
 main(){
  umask 077; mkdir -p /data/adb
  if [ -r "$CONF" ]; then . "$CONF"; fi
- [ -x "$BIN" ] || [ -x /data/adb/webdavfs ] && BIN='/data/adb/webdavfs'
+ if [ ! -x "$BIN" ] && [ -x /data/adb/webdavfs ]; then BIN='/data/adb/webdavfs'; fi
  if [ -f "$PIDFILE" ]; then old=$(cat "$PIDFILE" 2>/dev/null); if [ -n "$old" ] && kill -0 "$old" 2>/dev/null && [ "$old" != "$$" ]; then log "Already running pid=$old"; exit 0; fi; fi
  echo "$$" > "$PIDFILE"; trap 'rm -f "$PIDFILE"' EXIT INT TERM
  case "$POLL" in ''|*[!0-9]*) POLL=2;; esac; case "$GRACE" in ''|*[!0-9]*) GRACE=45;; esac; case "$RETRIES" in ''|*[!0-9]*) RETRIES=2;; esac
