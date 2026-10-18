@@ -1389,7 +1389,7 @@ LOG='/data/adb/lsp-boot.log'; APPLOG='/storage/emulated/0/WSA Installer/post-fs-
 EARLYLOG="$SELFDIR/post-fs-data.log"
 PIDFILE='/data/adb/webdavfs-daemon.pid'; STATE='/data/adb/webdavfs-state'
 BIN="$SELFDIR/webdavfs"
-POLL=3; GRACE=45; USER=''; PASS=''; SSL_VERIFY=0
+POLL=2; GRACE=45; USER=''; PASS=''; SSL_VERIFY=0; RETRIES=2
 MOUNT_OPTS='allow_other,context=u:object_r:media_rw_data_file:s0'
 log(){ line="$TAG $*"; echo "$line" >> "$LOG" 2>/dev/null; echo "$line" >> "$APPLOG" 2>/dev/null; echo "$line" >> "$EARLYLOG" 2>/dev/null; echo "$line"; }
 prop(){ getprop "$1" 2>/dev/null; }
@@ -1398,14 +1398,15 @@ json_obj(){ echo "$1" | grep -oE "\"$2\"[[:space:]]*:[[:space:]]*\{[^}]*" | head
 json_bool(){ json_obj "$1" "$2" | grep -oE '"mount"[[:space:]]*:[[:space:]]*(true|false)' | head -n 1 | sed -E 's/.*:[[:space:]]*//'; }
 json_label(){ json_obj "$1" "$2" | grep -oE '"sdcard"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/^[^"]*"sdcard"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' | head -n 1; }
 clean_label(){ label=$(printf '%s' "$1" | tr '/\\' '__' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); case "$label" in ''|.|..) label="$2: Drive";; esac; printf '%s' "$label"; }
-short_name(){ short=$(printf '%s' "$1" | tr -cd 'A-Za-z0-9._-' | cut -c1-16); [ -n "$short" ] || short="$2"; printf '%s' "$short"; }
+short_name(){ short=$(printf '%s' "$1" | sed 's/[\/\\:*?"<>|]/_/g; s/[[:space:]]\{1,\}/_/g; s/^_*//; s/_*$//' | cut -c1-30); [ -n "$short" ] || short="$2"; printf '%s' "$short"; }
 mounted(){ grep -F " $1 " /proc/mounts >/dev/null 2>&1; }
+healthy(){ mounted "$1" && ls "$1/" >/dev/null 2>&1; }
 rescan_media(){ if command -v am >/dev/null 2>&1; then am broadcast -a android.intent.action.MEDIA_MOUNTED -d file:///sdcard >/dev/null 2>&1; fi; }
 rescan_storage(){ if command -v am >/dev/null 2>&1; then am broadcast -a android.intent.action.MEDIA_MOUNTED -d "file:///storage/$1" >/dev/null 2>&1; fi; }
 state_get(){ [ -r "$STATE" ] && sed -n "s/^$1=//p" "$STATE" | head -n 1; }
 state_set(){ key="$1"; val="$2"; [ -w "$STATE" ] || : > "$STATE"; grep -v "^$key=" "$STATE" > "$STATE.tmp" 2>/dev/null; mv "$STATE.tmp" "$STATE" 2>/dev/null; printf '%s=%s\n' "$key" "$val" >> "$STATE"; }
 state_del(){ key="$1"; [ -w "$STATE" ] || return 0; grep -v "^$key=" "$STATE" > "$STATE.tmp" 2>/dev/null; mv "$STATE.tmp" "$STATE" 2>/dev/null; }
-mount_drive(){ letter="$1"; label="$2"; short=$(short_name "$label" "$(printf '%s' "$letter" | tr '[:lower:]' '[:upper:]')"); target="/mnt/media_rw/$short"; storage="/storage/$short"; mounted "$target" && { [ -L "$storage" ] || ln -sfn "$target" "$storage" 2>/dev/null; return 0; }; mkdir -p "$target" || { log "ERROR creating $target"; return 1; }; [ -x "$BIN" ] || { log "ERROR missing executable $BIN"; return 1; }; log "Mount request drive=$letter label=$label short=$short"; "$BIN" -d "http://127.0.0.1:8085/$letter/" "$target" -o "$MOUNT_OPTS" >> "$LOG" 2>&1; rc=$?; if [ "$rc" -eq 0 ]; then ln -sfn "$target" "$storage" 2>/dev/null; log "Mounted $target -> $storage"; rescan_storage "$short"; rescan_media; else log "ERROR mount failed drive=$letter exit=$rc"; fi; return "$rc"; }
+mount_drive(){ letter="$1"; label="$2"; short=$(short_name "$label" "$(printf '%s' "$letter" | tr '[:lower:]' '[:upper:]')"); target="/mnt/media_rw/$short"; storage="/storage/$short"; if healthy "$target"; then [ -L "$storage" ] || { ln -sfn "$target" "$storage" 2>/dev/null; rescan_storage "$short"; }; return 0; fi; if mounted "$target"; then log "Stale/failed mount $target; unmounting for remount"; unmount_drive "$short"; fi; [ -x "$BIN" ] || { log "ERROR missing executable $BIN"; return 1; }; mkdir -p "$target" || { log "ERROR creating $target"; return 1; }; try=1; while [ "$try" -le "$RETRIES" ]; do log "Mount attempt $try/$RETRIES drive=$letter label=$label short=$short"; "$BIN" -d "http://127.0.0.1:8085/$letter/" "$target" -o "$MOUNT_OPTS" >> "$LOG" 2>&1; rc=$?; if [ "$rc" -eq 0 ] && healthy "$target"; then ln -sfn "$target" "$storage" 2>/dev/null; log "Mounted USB '$label' at $target -> $storage"; rescan_storage "$short"; rescan_media; return 0; fi; log "Mount failed drive=$letter attempt=$try exit=$rc"; umount -l "$target" 2>/dev/null; try=$((try + 1)); sleep 1; done; log "ERROR giving up drive=$letter after $RETRIES attempts"; return 1; }
 unmount_drive(){ short="$1"; target="/mnt/media_rw/$short"; storage="/storage/$short"; if mounted "$target"; then if command -v fusermount >/dev/null 2>&1; then fusermount -u "$target"; elif command -v umount >/dev/null 2>&1; then umount "$target"; else return 1; fi; log "Unmounted $target"; fi; [ -L "$storage" ] && rm -f "$storage" 2>/dev/null; rescan_media; }
 main(){
  umask 077; mkdir -p /data/adb
@@ -1413,7 +1414,7 @@ main(){
  [ -x "$BIN" ] || [ -x /data/adb/webdavfs ] && BIN='/data/adb/webdavfs'
  if [ -f "$PIDFILE" ]; then old=$(cat "$PIDFILE" 2>/dev/null); if [ -n "$old" ] && kill -0 "$old" 2>/dev/null && [ "$old" != "$$" ]; then log "Already running pid=$old"; exit 0; fi; fi
  echo "$$" > "$PIDFILE"; trap 'rm -f "$PIDFILE"' EXIT INT TERM
- case "$POLL" in ''|*[!0-9]*) POLL=3;; esac; case "$GRACE" in ''|*[!0-9]*) GRACE=45;; esac
+ case "$POLL" in ''|*[!0-9]*) POLL=2;; esac; case "$GRACE" in ''|*[!0-9]*) GRACE=45;; esac; case "$RETRIES" in ''|*[!0-9]*) RETRIES=2;; esac
  log "Daemon started; waiting for boot completion"
  while [ "$(prop sys.boot_completed)" != 1 ]; do sleep 2; done
  failures=0
