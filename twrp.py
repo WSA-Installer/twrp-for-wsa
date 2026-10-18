@@ -1393,8 +1393,8 @@ POLL=2; GRACE=45; USER=''; PASS=''; SSL_VERIFY=0; RETRIES=2
 MOUNT_OPTS='allow_other,context=u:object_r:media_rw_data_file:s0'
 log(){ line="$TAG $*"; echo "$line" >> "$LOG" 2>/dev/null; echo "$line" >> "$APPLOG" 2>/dev/null; echo "$line" >> "$EARLYLOG" 2>/dev/null; echo "$line"; }
 prop(){ getprop "$1" 2>/dev/null; }
-fetch_registry(){ if command -v curl >/dev/null 2>&1; then curl -fsS --connect-timeout 2 --max-time 5 "$REGISTRY"; elif command -v wget >/dev/null 2>&1; then wget -q -T 5 -O - "$REGISTRY"; elif command -v nc >/dev/null 2>&1; then _rh=$(printf '%s' "$REGISTRY" | sed 's|^[a-z]*://||;s|[:/].*||'); _rp=$(printf '%s' "$REGISTRY" | sed -n 's|^[a-z]*://[^:]*:\([0-9]*\).*|\1|p'); _rp=${_rp:-80}; _ru=$(printf '%s' "$REGISTRY" | sed 's|^[a-z]*://[^/]*||'); { printf 'GET %s HTTP/1.0\r\nHost: %s:%s\r\nConnection: close\r\n\r\n' "$_ru" "$_rh" "$_rp"; sleep 1; } | nc -w 3 "$_rh" "$_rp" 2>/dev/null | sed '1,/^\r$/d'; else return 127; fi; }
-json_obj(){ echo "$1" | grep -oE "\"$2\"[[:space:]]*:[[:space:]]*\{[^}]*" | head -n 1; }
+fetch_registry(){ if command -v curl >/dev/null 2>&1; then curl -fsS --connect-timeout 2 --max-time 5 "$REGISTRY"; elif command -v wget >/dev/null 2>&1; then wget -q -T 5 -O - "$REGISTRY"; elif command -v nc >/dev/null 2>&1; then _rh=$(printf '%s' "$REGISTRY" | sed 's|^[a-z]*://||;s|[:/].*||'); _rp=$(printf '%s' "$REGISTRY" | sed -n 's|^[a-z]*://[^:]*:\([0-9]*\).*|\1|p'); _rp=${_rp:-80}; _ru=$(printf '%s' "$REGISTRY" | sed 's|^[a-z]*://[^/]*||'); { printf 'GET %s HTTP/1.0\r\nHost: %s:%s\r\nConnection: close\r\n\r\n' "$_ru" "$_rh" "$_rp"; sleep 1; } | { command -v timeout >/dev/null 2>&1 && timeout 8 nc -w 3 "$_rh" "$_rp" || nc -w 3 "$_rh" "$_rp"; } 2>/dev/null | sed '1,/^\r$/d'; else return 127; fi; }
+json_obj(){ printf '%s' "$1" | tr -d '\n' | grep -oE "\"$2\"[[:space:]]*:[[:space:]]*\{[^}]*\}" | head -n 1; }
 json_bool(){ json_obj "$1" "$2" | grep -oE '"mount"[[:space:]]*:[[:space:]]*(true|false)' | head -n 1 | sed -E 's/.*:[[:space:]]*//'; }
 json_label(){ json_obj "$1" "$2" | grep -oE '"sdcard"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/^[^"]*"sdcard"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' | head -n 1; }
 clean_label(){ label=$(printf '%s' "$1" | tr '/\\' '__' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); case "$label" in ''|.|..) label="$2: Drive";; esac; printf '%s' "$label"; }
@@ -1417,6 +1417,7 @@ main(){
  case "$POLL" in ''|*[!0-9]*) POLL=2;; esac; case "$GRACE" in ''|*[!0-9]*) GRACE=45;; esac; case "$RETRIES" in ''|*[!0-9]*) RETRIES=2;; esac
  log "Daemon started; waiting for boot completion"
  while [ "$(prop sys.boot_completed)" != 1 ]; do sleep 2; done
+ log "Boot complete; entering poll loop (POLL=${POLL}s)"
  failures=0
  while :; do
   if data=$(fetch_registry 2>/dev/null); then
